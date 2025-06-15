@@ -1,2 +1,12 @@
-node_modules
-out
+﻿################################################################################
+# This .gitignore file was automatically created by Microsoft(R) Visual Studio.
+################################################################################
+
+/.vs/HypeRate_Desktop/FileContentIndex
+/.vs/HypeRate_Desktop/node_modules
+/node_modules
+/dist
+**/.vs
+tasks.json
+.vs
+.vscode
