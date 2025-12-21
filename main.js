@@ -1,12 +1,21 @@
+// ========== MODULE IMPORTS ==========
+// Import Electron modules for creating the desktop application
 const { app, BrowserWindow, ipcMain } = require('electron');
+// Handle Squirrel events on Windows (auto-updater)
 if (require('electron-squirrel-startup')) app.quit();
 
+// Import Node.js file system and path modules
 const fs = require('fs');
 const path = require('path');
+// Import WebSocket client for real-time communication with HypeRate API
 const WebSocketClient = require('websocket').client;
+// Import JSON library for parsing
 const JSONlib = require('JSON');
+// Import MySQL library for database operations
 const mysql = require('mysql2');
 
+// ========== CONFIGURATION ==========
+// Default configuration settings for the application
 const defaultConfig = {
   sqlEnabled: false,
   dbHost: "",
@@ -19,9 +28,13 @@ const defaultConfig = {
   trackers: []
 };
 
+// Configuration file path (stored next to the executable)
 const configPath = path.join(path.dirname(process.execPath), 'config.json');
 
+// ========== CONFIG FILE MANAGEMENT ==========
+// Load configuration from file or use defaults
 let config = { ...defaultConfig };
+// Function to save configuration to disk
 function saveConfig(cfg) {
   try {
     fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2));
@@ -30,6 +43,7 @@ function saveConfig(cfg) {
     console.error('Failed to write config.json:', err);
   }
 }
+// Load and validate configuration from file
 try {
   if (!fs.existsSync(configPath)) {
     fs.writeFileSync(configPath, JSON.stringify(defaultConfig, null, 2));
@@ -38,6 +52,7 @@ try {
   const rawConfig = fs.readFileSync(configPath, 'utf8');
   config = JSONlib.parse(rawConfig);
 
+  // Validate and fix config values if they're invalid
   if (!Array.isArray(config.trackers)) {
     config.trackers = [];
   }
@@ -60,6 +75,8 @@ try {
   config = { ...defaultConfig };
 }
 
+// ========== DATABASE CONNECTION ==========
+// Initialize MySQL connection pool if SQL is enabled
 let pool = null;
 if (config.sqlEnabled) {
   pool = mysql.createPool({
@@ -74,6 +91,8 @@ if (config.sqlEnabled) {
   console.log("SQL logging disabled (sqlEnabled=false).");
 }
 
+// ========== DATABASE OPERATIONS ==========
+// Create a table for a specific tracker if it doesn't exist
 function createTableForTracker(tracker_id, callback) {
   if (!pool) return;
   const safeTableName = `CODE_${tracker_id.replace(/[^a-zA-Z0-9_]/g, '')}`;
@@ -91,6 +110,7 @@ function createTableForTracker(tracker_id, callback) {
     if (typeof callback === 'function') callback(safeTableName);
   });
 }
+// Store heart rate data to database immediately
 function storeHeartRateNow(tracker_id, heartRate, timeText) {
   if (!config.sqlEnabled || !pool) return;
   if (heartRate === 0) return;  
@@ -104,6 +124,8 @@ function storeHeartRateNow(tracker_id, heartRate, timeText) {
     });
   });
 }
+// ========== TRACKER STATE MANAGEMENT ==========
+// Initialize tracker data structure from config
 const IDs = {};
 config.trackers.forEach(tracker => {
   IDs[tracker.id] = {
@@ -114,6 +136,8 @@ config.trackers.forEach(tracker => {
   };
 });
 
+// ========== TIME FORMATTING ==========
+// Build time text for database entries (optimized to only include date when it changes)
 let lastDay = "";
 function buildTimeText() {
   const now = new Date();
@@ -129,6 +153,8 @@ function buildTimeText() {
   }
 }
 
+// ========== PERIODIC DATABASE WRITES ==========
+// Start interval timer to periodically write heart rate data to database
 function startDbTimer() {
   const ms = config.dbWriteIntervalMs || 2000;
   setInterval(() => {
@@ -150,6 +176,8 @@ function startDbTimer() {
   }, ms);
 }
 
+// ========== WEBSOCKET RECONNECTION ==========
+// Handle automatic reconnection to WebSocket with backoff
 let reconnectScheduled = false;
 function scheduleReconnect(reason) {
   if (!reconnectScheduled) {
@@ -162,6 +190,8 @@ function scheduleReconnect(reason) {
     }, 10000);
   }
 }
+// ========== WEBSOCKET CONNECTION SETUP ==========
+// HypeRate API configuration and connection variables
 const API_KEY = "";
 const API_URL = `wss://app.hyperate.io/socket/websocket?token=${API_KEY}`;
 const client = new WebSocketClient();
@@ -169,12 +199,15 @@ let mainWindow = null;
 let connectionSocket = null;
 let heartbeatInterval = null;
 
+// ========== MESSAGE HANDLERS ==========
+// Handle incoming WebSocket messages
 function onMessage(data) {
   if (data.event === "hr_update") {
     onHrUpdate(data);
   }
 }
 
+// Process heart rate updates from HypeRate API
 function onHrUpdate(data) {
   const ID = data.topic.split(":")[1];
   const heartRate = data.payload.hr;
@@ -190,6 +223,7 @@ function onHrUpdate(data) {
     mainWindow.webContents.send("update-heart-rate", IDs);
   }
 }
+// Join a specific tracker's channel on the HypeRate WebSocket
 function joinTrackerChannel(ID) {
   if (connectionSocket && connectionSocket.connected) {
     connectionSocket.sendUTF(JSON.stringify({
@@ -201,6 +235,8 @@ function joinTrackerChannel(ID) {
     console.log(`Joined channel for ${ID}`);
   }
 }
+// ========== TRACKER MANAGEMENT ==========
+// Add a new heart rate tracker and join its channel
 function addHeartRateTracker(ID, name) {
   if (!IDs[ID]) {
     IDs[ID] = {
@@ -218,6 +254,8 @@ function addHeartRateTracker(ID, name) {
     joinTrackerChannel(ID);
   }
 }
+// ========== ELECTRON WINDOW SETUP ==========
+// Create the main application window with transparent overlay settings
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 100,
@@ -233,6 +271,7 @@ function createWindow() {
     },
   });
 
+  // Set up IPC (Inter-Process Communication) handlers
   ipcMain.on("close-app", () => mainWindow.close());
   ipcMain.on("add-tracker", (event, data) => addHeartRateTracker(data.ID, data.name));
 
@@ -241,6 +280,8 @@ function createWindow() {
   console.log("Connecting to HypeRate...");
   client.connect(API_URL);
 }
+// ========== APP LIFECYCLE ==========
+// Initialize app when Electron is ready
 app.whenReady().then(() => {
   createWindow();
   startDbTimer(); // Storing data on a global timer
@@ -249,10 +290,12 @@ app.whenReady().then(() => {
   });
 });
 
+// Quit when all windows are closed (except on macOS)
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
+// Clean up connections before app quits
 app.on('before-quit', () => {
   if (connectionSocket && connectionSocket.connected) {
     connectionSocket.close();
@@ -261,14 +304,18 @@ app.on('before-quit', () => {
     clearInterval(heartbeatInterval);
   }
 });
+// ========== WEBSOCKET EVENT HANDLERS ==========
+// Handle connection failures
 client.on('connectFailed', function (error) {
   console.log("Connect Failed:", error.toString());
   scheduleReconnect("connectFailed");
 });
 
+// Handle successful WebSocket connection
 client.on('connect', function (connection) {
   connectionSocket = connection;
   console.log("Client Connected");
+  // Send periodic heartbeat to keep connection alive
   heartbeatInterval = setInterval(() => {
     if (connection && connection.connected) {
       connection.sendUTF(JSON.stringify({
@@ -289,6 +336,7 @@ client.on('connect', function (connection) {
     scheduleReconnect("connection closed");
   });
 
+  // Handle incoming messages from WebSocket
   connection.on("message", function (message) {
     if (message.type !== "utf8") {
       return console.error("Message is not UTF8");
@@ -301,7 +349,7 @@ client.on('connect', function (connection) {
     }
   });
 
-  // Join all known trackers
+  // Join channels for all configured trackers on connection
   Object.keys(IDs).forEach((ID) => {
     joinTrackerChannel(ID);
   });
