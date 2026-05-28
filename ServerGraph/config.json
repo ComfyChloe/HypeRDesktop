@@ -1,0 +1,8 @@
+{
+  "sqlEnabled": true,
+  "dbHost": "192.168.100.125",
+  "dbPort": "3306",
+  "dbUser": "heartbeat5",
+  "dbPassword": "Download12@",
+  "dbName": "heartmonitor"
+}

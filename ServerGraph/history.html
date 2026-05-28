@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HypeRDesktop · Heart Rate History</title>
+  <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0d1117;
+      --bg2: #161b22;
+      --bg3: #21262d;
+      --border: #30363d;
+      --text: #e6edf3;
+      --text2: #8b949e;
+      --red: #f85149;
+      --blue: #58a6ff;
+      --green: #3fb950;
+      --orange: #d29922;
+      --radius: 6px;
+    }
+    html, body { height: 100%; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 14px; }
+    body { display: flex; flex-direction: column; min-height: 100vh; }
+
+    /* ── Header ── */
+    header {
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px 16px; border-bottom: 1px solid var(--border);
+      background: var(--bg2); flex-shrink: 0;
+    }
+    .logo { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 15px; }
+    .heart-icon { color: var(--red); font-size: 18px; animation: pulse 1.4s ease-in-out infinite; }
+    @keyframes pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.18); } }
+    .status-pill {
+      display: flex; align-items: center; gap: 6px;
+      padding: 3px 10px; border-radius: 12px;
+      background: var(--bg3); border: 1px solid var(--border);
+      font-size: 12px; color: var(--text2);
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border); flex-shrink: 0; }
+    .dot.connected { background: var(--green); box-shadow: 0 0 6px var(--green); }
+    .dot.error { background: var(--red); }
+    .spacer { flex: 1; }
+    .auto-refresh-wrap { display: flex; align-items: center; gap: 6px; color: var(--text2); font-size: 12px; cursor: pointer; }
+    .auto-refresh-wrap input { cursor: pointer; accent-color: var(--blue); }
+    #refreshBtn {
+      padding: 4px 12px; border: 1px solid var(--border); border-radius: var(--radius);
+      background: var(--bg3); color: var(--text2); cursor: pointer; font-size: 12px;
+    }
+    #refreshBtn:hover { border-color: var(--blue); color: var(--blue); }
+
+    /* ── Connection panel ── */
+    #connPanel {
+      border-bottom: 1px solid var(--border); background: var(--bg2); flex-shrink: 0;
+    }
+    .panel-toggle {
+      width: 100%; padding: 8px 16px; background: none; border: none; color: var(--text2);
+      text-align: left; cursor: pointer; display: flex; align-items: center; gap: 6px;
+      font-size: 12px; font-family: inherit;
+    }
+    .panel-toggle:hover { color: var(--text); background: var(--bg3); }
+    .toggle-arrow { transition: transform 0.2s; font-style: normal; }
+    .toggle-arrow.open { transform: rotate(90deg); }
+    .panel-body {
+      padding: 12px 16px; display: none; flex-wrap: wrap; gap: 10px; align-items: flex-end;
+      border-top: 1px solid var(--border);
+    }
+    .panel-body.visible { display: flex; }
+    .field { display: flex; flex-direction: column; gap: 4px; }
+    .field label { font-size: 11px; color: var(--text2); }
+    .field input {
+      padding: 5px 8px; background: var(--bg3); border: 1px solid var(--border);
+      border-radius: var(--radius); color: var(--text); font-size: 13px; width: 140px;
+    }
+    .field input.short { width: 72px; }
+    .field input:focus { outline: none; border-color: var(--blue); }
+    #connectBtn {
+      padding: 6px 16px; background: var(--blue); color: #000; border: none;
+      border-radius: var(--radius); font-weight: 600; cursor: pointer; font-size: 13px;
+    }
+    #connectBtn:hover { opacity: 0.85; }
+    #connectMsg { font-size: 12px; color: var(--text2); align-self: center; }
+    #connectMsg.ok { color: var(--green); }
+    #connectMsg.err { color: var(--red); }
+
+    /* ── Controls bar ── */
+    #controls {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
+      padding: 10px 16px; border-bottom: 1px solid var(--border);
+      background: var(--bg2); flex-shrink: 0;
+    }
+    .ctrl-group { display: flex; align-items: center; gap: 6px; }
+    .ctrl-label { font-size: 11px; color: var(--text2); white-space: nowrap; }
+    #trackerSelect {
+      padding: 5px 8px; background: var(--bg3); border: 1px solid var(--border);
+      border-radius: var(--radius); color: var(--text); font-size: 13px; min-width: 130px;
+    }
+    #trackerSelect:focus { outline: none; border-color: var(--blue); }
+    .btn-group { display: flex; }
+    .seg-btn {
+      padding: 4px 10px; border: 1px solid var(--border); background: var(--bg3);
+      color: var(--text2); cursor: pointer; font-size: 12px; transition: all 0.15s;
+    }
+    .seg-btn:first-child { border-radius: var(--radius) 0 0 var(--radius); }
+    .seg-btn:last-child { border-radius: 0 var(--radius) var(--radius) 0; }
+    .seg-btn:not(:first-child) { border-left: none; }
+    .seg-btn:hover { color: var(--text); background: var(--bg); }
+    .seg-btn.active { background: var(--blue); color: #000; border-color: var(--blue); font-weight: 600; }
+    #customWrap { display: none; align-items: center; gap: 6px; }
+    #customWrap input[type="datetime-local"] {
+      padding: 4px 8px; background: var(--bg3); border: 1px solid var(--border);
+      border-radius: var(--radius); color: var(--text); font-size: 12px;
+      color-scheme: dark;
+    }
+    #applyBtn {
+      padding: 4px 12px; background: var(--bg3); border: 1px solid var(--blue);
+      border-radius: var(--radius); color: var(--blue); cursor: pointer; font-size: 12px;
+    }
+    #applyBtn:hover { background: var(--blue); color: #000; }
+    .ctrl-sep { width: 1px; height: 20px; background: var(--border); }
+
+    /* ── Stats bar ── */
+    #statsBar {
+      display: flex; flex-wrap: wrap; gap: 1px;
+      background: var(--border); border-bottom: 1px solid var(--border); flex-shrink: 0;
+    }
+    .stat-card {
+      flex: 1; min-width: 100px; padding: 10px 16px;
+      background: var(--bg2); display: flex; flex-direction: column; gap: 2px;
+    }
+    .stat-label { font-size: 10px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.6px; }
+    .stat-value { font-size: 22px; font-weight: 700; line-height: 1; color: var(--text); }
+    .stat-unit { font-size: 10px; color: var(--text2); }
+    .stat-card.s-min .stat-value { color: var(--green); }
+    .stat-card.s-max .stat-value { color: var(--blue); }
+    .stat-card.s-avg .stat-value { color: var(--red); }
+    .stat-card.s-med .stat-value { color: var(--orange); }
+
+    /* ── Chart area ── */
+    #chartArea {
+      flex: 1; position: relative; min-height: 300px; background: var(--bg);
+      display: flex; flex-direction: column;
+    }
+    #chartLegend {
+      position: absolute; top: 10px; left: 12px; z-index: 10;
+      display: flex; gap: 14px; pointer-events: none;
+    }
+    .legend-item { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text2); }
+    .legend-dot { width: 10px; height: 3px; border-radius: 2px; }
+    #chartContainer { flex: 1; width: 100%; }
+    #tooltip {
+      position: absolute; display: none; pointer-events: none; z-index: 100;
+      background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 8px 12px; font-size: 12px; box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+      min-width: 140px;
+    }
+    .tt-time { color: var(--text2); margin-bottom: 6px; font-size: 11px; }
+    .tt-row { display: flex; align-items: center; gap: 6px; padding: 1px 0; }
+    .tt-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .tt-row b { margin-left: auto; padding-left: 10px; color: var(--text); }
+    #chartOverlay {
+      position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+      background: rgba(13,17,23,0.85); z-index: 20; pointer-events: none;
+    }
+    .overlay-box { text-align: center; color: var(--text2); }
+    .overlay-icon { font-size: 32px; margin-bottom: 8px; }
+    .overlay-msg { font-size: 14px; }
+    .overlay-sub { font-size: 12px; margin-top: 4px; color: #484f58; }
+    #chartOverlay.hidden { display: none; }
+    #loadingBar {
+      position: absolute; top: 0; left: 0; height: 2px; background: var(--blue);
+      width: 0; transition: width 0.3s; z-index: 30;
+    }
+
+    /* ── Footer ── */
+    footer {
+      display: flex; align-items: center; gap: 8px; padding: 6px 16px;
+      border-top: 1px solid var(--border); background: var(--bg2);
+      font-size: 11px; color: var(--text2); flex-shrink: 0;
+    }
+    #rowNote { margin-left: auto; }
+
+    /* ── Scrollbar ── */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg); }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  </style>
+</head>
+<body>
+
+<!-- Header -->
+<header>
+  <div class="logo">
+    <span class="heart-icon">♥</span>
+    Heart Rate History
+  </div>
+  <div class="status-pill">
+    <span class="dot" id="statusDot"></span>
+    <span id="statusText">Connecting…</span>
+  </div>
+  <div class="spacer"></div>
+  <label class="auto-refresh-wrap">
+    <input type="checkbox" id="autoRefresh"> Auto-refresh (30s)
+  </label>
+  <button id="refreshBtn" onclick="loadData()">↻ Refresh</button>
+</header>
+
+<!-- Connection Panel -->
+<div id="connPanel">
+  <button class="panel-toggle" onclick="toggleConn()">
+    <span class="toggle-arrow" id="connArrow">▶</span>
+    Connection Settings
+    <span id="connHost" style="margin-left:6px;color:var(--text2);font-size:11px;"></span>
+  </button>
+  <div class="panel-body" id="connBody">
+    <div class="field"><label>Host</label><input id="dbHost" placeholder="192.168.1.100"></div>
+    <div class="field"><label>Port</label><input id="dbPort" value="3306" class="short"></div>
+    <div class="field"><label>User</label><input id="dbUser" placeholder="root"></div>
+    <div class="field"><label>Password</label><input id="dbPass" type="password" placeholder="••••••"></div>
+    <div class="field"><label>Database</label><input id="dbName" value="heartmonitor"></div>
+    <button id="connectBtn" onclick="connect()">Connect</button>
+    <span id="connectMsg" style="max-width:360px;word-break:break-word;"></span>
+  </div>
+</div>
+
+<!-- Controls -->
+<div id="controls">
+  <div class="ctrl-group">
+    <span class="ctrl-label">Tracker</span>
+    <select id="trackerSelect" onchange="onTrackerChange()">
+      <option value="">— select —</option>
+    </select>
+  </div>
+  <div class="ctrl-sep"></div>
+  <div class="ctrl-group">
+    <span class="ctrl-label">Range</span>
+    <div class="btn-group">
+      <button class="seg-btn" data-preset="1h"   onclick="setPreset('1h')">1 h</button>
+      <button class="seg-btn" data-preset="6h"   onclick="setPreset('6h')">6 h</button>
+      <button class="seg-btn active" data-preset="24h" onclick="setPreset('24h')">24 h</button>
+      <button class="seg-btn" data-preset="7d"   onclick="setPreset('7d')">7 d</button>
+      <button class="seg-btn" data-preset="30d"  onclick="setPreset('30d')">30 d</button>
+      <button class="seg-btn" data-preset="custom" onclick="setPreset('custom')">Custom</button>
+    </div>
+  </div>
+  <div id="customWrap">
+    <input type="datetime-local" id="fromInput">
+    <span style="color:var(--text2);font-size:12px;">→</span>
+    <input type="datetime-local" id="toInput">
+    <button id="applyBtn" onclick="applyCustom()">Apply</button>
+  </div>
+  <div class="ctrl-sep"></div>
+  <div class="ctrl-group">
+    <span class="ctrl-label">Interval</span>
+    <div class="btn-group">
+      <button class="seg-btn" data-interval="raw" onclick="setIntervalMode('raw')">Raw</button>
+      <button class="seg-btn" data-interval="1m"  onclick="setIntervalMode('1m')">1 min</button>
+      <button class="seg-btn" data-interval="5m"  onclick="setIntervalMode('5m')">5 min</button>
+      <button class="seg-btn active" data-interval="1h" onclick="setIntervalMode('1h')">1 hr</button>
+      <button class="seg-btn" data-interval="1d"  onclick="setIntervalMode('1d')">1 day</button>
+    </div>
+  </div>
+</div>
+
+<!-- Stats bar -->
+<div id="statsBar">
+  <div class="stat-card s-min">
+    <span class="stat-label">Min</span>
+    <span class="stat-value" id="sMin">—</span>
+    <span class="stat-unit">bpm</span>
+  </div>
+  <div class="stat-card s-avg">
+    <span class="stat-label">Average</span>
+    <span class="stat-value" id="sAvg">—</span>
+    <span class="stat-unit">bpm</span>
+  </div>
+  <div class="stat-card s-max">
+    <span class="stat-label">Max</span>
+    <span class="stat-value" id="sMax">—</span>
+    <span class="stat-unit">bpm</span>
+  </div>
+  <div class="stat-card s-med">
+    <span class="stat-label">Median</span>
+    <span class="stat-value" id="sMed">—</span>
+    <span class="stat-unit">bpm</span>
+  </div>
+  <div class="stat-card">
+    <span class="stat-label">Data Points</span>
+    <span class="stat-value" id="sCount">—</span>
+    <span class="stat-unit" id="sCountUnit">readings</span>
+  </div>
+  <div class="stat-card">
+    <span class="stat-label">Period Start</span>
+    <span class="stat-value" id="sFirst" style="font-size:13px;margin-top:3px;">—</span>
+    <span class="stat-unit" id="sLast">—</span>
+  </div>
+</div>
+
+<!-- Chart -->
+<div id="chartArea">
+  <div id="loadingBar"></div>
+  <div id="chartLegend"></div>
+  <div id="chartContainer"></div>
+  <div id="tooltip"></div>
+  <div id="chartOverlay">
+    <div class="overlay-box">
+      <div class="overlay-icon">♥</div>
+      <div class="overlay-msg" id="overlayMsg">Select a tracker to view history</div>
+      <div class="overlay-sub" id="overlaySub">Connect to a database and choose a tracker above</div>
+    </div>
+  </div>
+</div>
+
+<!-- Footer -->
+<footer>
+  <span id="lastUpdated">Never loaded</span>
+  <span id="rowNote"></span>
+</footer>
+
+<script>
+// ── State ─────────────────────────────────────────────────────────────────────
+const S = {
+  tracker: null,
+  from: null,
+  to: null,
+  interval: '1h',
+  preset: '24h',
+  autoRefreshTimer: null,
+  chart: null,
+  rawSeries: null,
+  avgSeries: null,
+  maxSeries: null,
+  minSeries: null,
+  loading: false,
+};
+
+// ── API ───────────────────────────────────────────────────────────────────────
+async function api(path) {
+  const res = await fetch(path);
+  if (!res.ok) {
+    const j = await res.json().catch(() => ({}));
+    throw new Error(j.error || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+async function apiPost(path, body) {
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return res.json();
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+async function init() {
+  initChart();
+  setPreset('24h', false); // set range without loading
+  await checkStatus();
+  await loadTrackers();
+}
+
+async function checkStatus() {
+  try {
+    const s = await api('/api/status');
+    setStatusUI(s.connected, s.host ? `${s.host}/${s.dbName}` : '');
+    if (s.configured) {
+      document.getElementById('dbHost').value = s.host || '';
+      document.getElementById('dbName').value = s.dbName || '';
+      document.getElementById('connHost').textContent = s.host ? `— ${s.host}/${s.dbName}` : '';
+    }
+  } catch {
+    setStatusUI(false, '');
+  }
+}
+
+async function loadTrackers() {
+  try {
+    const { trackers } = await api('/api/trackers');
+    const sel = document.getElementById('trackerSelect');
+    const prev = sel.value;
+    // Preserve existing options header
+    sel.innerHTML = '<option value="">— select —</option>';
+    for (const t of trackers) {
+      const opt = document.createElement('option');
+      opt.value = t.id;
+      const srcLabel = t.sources.join('+');
+      opt.textContent = `${t.id}  (${Number(t.rowEstimate).toLocaleString()} rows, ${srcLabel})`;
+      sel.appendChild(opt);
+    }
+    // Restore previous selection or pick first
+    if (prev && [...sel.options].some(o => o.value === prev)) {
+      sel.value = prev;
+    } else if (trackers.length > 0) {
+      sel.value = trackers[0].id;
+      S.tracker = trackers[0].id;
+      await loadData();
+    }
+  } catch (e) {
+    console.warn('loadTrackers:', e.message);
+  }
+}
+
+// ── Connection ────────────────────────────────────────────────────────────────
+function toggleConn() {
+  const body = document.getElementById('connBody');
+  const arrow = document.getElementById('connArrow');
+  const open = body.classList.toggle('visible');
+  arrow.classList.toggle('open', open);
+}
+
+async function connect() {
+  const btn = document.getElementById('connectBtn');
+  const msg = document.getElementById('connectMsg');
+  btn.disabled = true;
+  btn.textContent = '…';
+  msg.textContent = '';
+  msg.className = '';
+  const payload = {
+    host: document.getElementById('dbHost').value.trim(),
+    port: document.getElementById('dbPort').value.trim() || '3306',
+    user: document.getElementById('dbUser').value.trim(),
+    password: document.getElementById('dbPass').value,
+    dbName: document.getElementById('dbName').value.trim(),
+  };
+  try {
+    const res = await apiPost('/api/connect', payload);
+    if (res.connected) {
+      msg.textContent = '✓ Connected';
+      msg.className = 'ok';
+      setStatusUI(true, `${payload.host}/${payload.dbName}`);
+      document.getElementById('connHost').textContent = `— ${payload.host}/${payload.dbName}`;
+      await loadTrackers();
+    } else {
+      msg.textContent = res.message || 'Connection failed';
+      msg.className = 'err';
+      setStatusUI(false, '');
+    }
+  } catch (e) {
+    msg.textContent = e.message;
+    msg.className = 'err';
+  }
+  btn.disabled = false;
+  btn.textContent = 'Connect';
+}
+
+// ── Time range ────────────────────────────────────────────────────────────────
+const PRESET_OFFSETS = { '1h': 3600, '6h': 21600, '24h': 86400, '7d': 604800, '30d': 2592000 };
+
+function setPreset(preset, load = true) {
+  S.preset = preset;
+  document.querySelectorAll('[data-preset]').forEach(b => b.classList.toggle('active', b.dataset.preset === preset));
+  const customWrap = document.getElementById('customWrap');
+  if (preset === 'custom') {
+    customWrap.style.display = 'flex';
+    // Pre-fill inputs with current range if set
+    if (S.from) document.getElementById('fromInput').value = toInputVal(S.from);
+    if (S.to)   document.getElementById('toInput').value = toInputVal(S.to);
+    return; // wait for Apply
+  }
+  customWrap.style.display = 'none';
+  const secs = PRESET_OFFSETS[preset] || 86400;
+  S.to = new Date();
+  S.from = new Date(S.to.getTime() - secs * 1000);
+  if (load && S.tracker) loadData();
+}
+
+function applyCustom() {
+  const f = document.getElementById('fromInput').value;
+  const t = document.getElementById('toInput').value;
+  if (!f || !t) return;
+  S.from = new Date(f);
+  S.to = new Date(t);
+  if (isNaN(S.from) || isNaN(S.to)) return;
+  if (S.tracker) loadData();
+}
+
+function toInputVal(d) {
+  const z = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${z(d.getMonth()+1)}-${z(d.getDate())}T${z(d.getHours())}:${z(d.getMinutes())}`;
+}
+
+// ── Interval ──────────────────────────────────────────────────────────────────
+function setIntervalMode(iv) {
+  S.interval = iv;
+  document.querySelectorAll('[data-interval]').forEach(b => b.classList.toggle('active', b.dataset.interval === iv));
+  if (S.tracker) loadData();
+}
+
+function onTrackerChange() {
+  S.tracker = document.getElementById('trackerSelect').value || null;
+  if (S.tracker) loadData();
+}
+
+// ── Data loading ──────────────────────────────────────────────────────────────
+async function loadData() {
+  if (!S.tracker || !S.from || !S.to || S.loading) return;
+  S.loading = true;
+  setLoading(true);
+  try {
+    // Update range if preset (so "now" is current)
+    if (S.preset !== 'custom') {
+      const secs = PRESET_OFFSETS[S.preset] || 86400;
+      S.to = new Date();
+      S.from = new Date(S.to.getTime() - secs * 1000);
+    }
+    const params = new URLSearchParams({
+      tracker: S.tracker,
+      from: S.from.toISOString(),
+      to: S.to.toISOString(),
+      interval: S.interval,
+    });
+    const [hrData, statsData] = await Promise.all([
+      api(`/api/heartrate?${params}`),
+      api(`/api/stats?tracker=${encodeURIComponent(S.tracker)}&from=${S.from.toISOString()}&to=${S.to.toISOString()}`),
+    ]);
+    renderChart(hrData);
+    renderStats(statsData);
+    document.getElementById('lastUpdated').textContent = `Updated: ${new Date().toLocaleTimeString()}`;
+    hideOverlay();
+  } catch (e) {
+    showOverlay('⚠', e.message, 'Check connection and tracker settings');
+    console.error('loadData:', e);
+  }
+  S.loading = false;
+  setLoading(false);
+}
+
+// ── Chart ─────────────────────────────────────────────────────────────────────
+function initChart() {
+  const container = document.getElementById('chartContainer');
+  S.chart = LightweightCharts.createChart(container, {
+    width: container.clientWidth,
+    height: 0, // will be sized by CSS flex
+    layout: { background: { color: '#0d1117' }, textColor: '#8b949e' },
+    grid: { vertLines: { color: '#21262d' }, horzLines: { color: '#21262d' } },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    rightPriceScale: { borderColor: '#30363d' },
+    timeScale: { borderColor: '#30363d', timeVisible: true, secondsVisible: true },
+  });
+  // Make chart fill its container height
+  const ro = new ResizeObserver(entries => {
+    for (const e of entries) {
+      S.chart.applyOptions({ width: e.contentRect.width, height: e.contentRect.height });
+    }
+  });
+  ro.observe(container);
+  // Crosshair tooltip
+  const tooltip = document.getElementById('tooltip');
+  S.chart.subscribeCrosshairMove(param => {
+    if (!param.time || !param.point) { tooltip.style.display = 'none'; return; }
+    const x = param.point.x;
+    const y = param.point.y;
+    const cw = container.clientWidth;
+    const tw = 160;
+    tooltip.style.left = (x + 16 > cw - tw ? x - tw - 10 : x + 16) + 'px';
+    tooltip.style.top = Math.max(4, y - 70) + 'px';
+    const ts = typeof param.time === 'number' ? param.time : 0;
+    const dateStr = new Date(ts * 1000).toLocaleString([], { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    if (S.rawSeries) {
+      const v = param.seriesData.get(S.rawSeries);
+      if (!v) { tooltip.style.display = 'none'; return; }
+      tooltip.innerHTML = `<div class="tt-time">${dateStr}</div><div class="tt-row"><span class="tt-dot" style="background:#f85149"></span>Heart Rate<b>${v.value} bpm</b></div>`;
+    } else {
+      const a = param.seriesData.get(S.avgSeries);
+      const mx = param.seriesData.get(S.maxSeries);
+      const mn = param.seriesData.get(S.minSeries);
+      if (!a) { tooltip.style.display = 'none'; return; }
+      tooltip.innerHTML = `
+        <div class="tt-time">${dateStr}</div>
+        <div class="tt-row"><span class="tt-dot" style="background:#58a6ff"></span>Max<b>${mx?.value ?? '—'} bpm</b></div>
+        <div class="tt-row"><span class="tt-dot" style="background:#f85149"></span>Avg<b>${a.value} bpm</b></div>
+        <div class="tt-row"><span class="tt-dot" style="background:#3fb950"></span>Min<b>${mn?.value ?? '—'} bpm</b></div>`;
+    }
+    tooltip.style.display = 'block';
+  });
+}
+
+function clearSeries() {
+  if (S.rawSeries) { S.chart.removeSeries(S.rawSeries); S.rawSeries = null; }
+  if (S.avgSeries) { S.chart.removeSeries(S.avgSeries); S.avgSeries = null; }
+  if (S.maxSeries) { S.chart.removeSeries(S.maxSeries); S.maxSeries = null; }
+  if (S.minSeries) { S.chart.removeSeries(S.minSeries); S.minSeries = null; }
+  document.getElementById('chartLegend').innerHTML = '';
+}
+
+function renderChart(hrData) {
+  clearSeries();
+  if (!hrData.data || hrData.data.length === 0) {
+    showOverlay('📭', 'No data in this range', 'Try a wider time range or different tracker');
+    return;
+  }
+  const legend = document.getElementById('chartLegend');
+  if (hrData.mode === 'raw') {
+    S.rawSeries = S.chart.addLineSeries({
+      color: '#f85149', lineWidth: 1,
+      priceLineVisible: false, lastValueVisible: true,
+    });
+    S.rawSeries.setData(hrData.data);
+    legend.innerHTML = '<div class="legend-item"><div class="legend-dot" style="background:#f85149"></div>Heart Rate</div>';
+    document.getElementById('rowNote').textContent = hrData.data.length === 10000
+      ? '⚠ Capped at 10,000 raw points — use 5 min interval for larger ranges'
+      : `${hrData.data.length.toLocaleString()} raw readings`;
+  } else {
+    S.maxSeries = S.chart.addLineSeries({
+      color: '#58a6ff', lineWidth: 1,
+      lineStyle: LightweightCharts.LineStyle.Dashed,
+      priceLineVisible: false, lastValueVisible: false,
+    });
+    S.avgSeries = S.chart.addLineSeries({
+      color: '#f85149', lineWidth: 2,
+      priceLineVisible: false, lastValueVisible: true,
+    });
+    S.minSeries = S.chart.addLineSeries({
+      color: '#3fb950', lineWidth: 1,
+      lineStyle: LightweightCharts.LineStyle.Dashed,
+      priceLineVisible: false, lastValueVisible: false,
+    });
+    const avg = hrData.data.map(d => ({ time: d.time, value: d.avg }));
+    const max = hrData.data.map(d => ({ time: d.time, value: d.max }));
+    const min = hrData.data.map(d => ({ time: d.time, value: d.min }));
+    S.avgSeries.setData(avg);
+    S.maxSeries.setData(max);
+    S.minSeries.setData(min);
+    const iv = hrData.interval;
+    legend.innerHTML = `
+      <div class="legend-item"><div class="legend-dot" style="background:#58a6ff;height:1px;border-top:1px dashed #58a6ff"></div>Max</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#f85149"></div>Avg (${iv})</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#3fb950;height:1px;border-top:1px dashed #3fb950"></div>Min</div>`;
+    document.getElementById('rowNote').textContent = `${hrData.data.length.toLocaleString()} ${iv} buckets`;
+  }
+  S.chart.timeScale().fitContent();
+  hideOverlay();
+}
+
+// ── Stats ─────────────────────────────────────────────────────────────────────
+function renderStats(stats) {
+  if (stats.error) return;
+  document.getElementById('sMin').textContent   = stats.min  ?? '—';
+  document.getElementById('sAvg').textContent   = stats.avg  ?? '—';
+  document.getElementById('sMax').textContent   = stats.max  ?? '—';
+  document.getElementById('sMed').textContent   = stats.median !== null ? stats.median : '—';
+  document.getElementById('sCount').textContent = stats.count ? stats.count.toLocaleString() : '—';
+  if (stats.firstAt) {
+    const d = new Date(stats.firstAt);
+    document.getElementById('sFirst').textContent = d.toLocaleDateString([], { month: 'short', day: 'numeric', year: '2-digit' });
+    document.getElementById('sLast').textContent  = stats.lastAt
+      ? new Date(stats.lastAt).toLocaleDateString([], { month: 'short', day: 'numeric', year: '2-digit' })
+      : '';
+  }
+}
+
+// ── UI helpers ────────────────────────────────────────────────────────────────
+function setStatusUI(connected, label) {
+  document.getElementById('statusDot').className = 'dot ' + (connected ? 'connected' : 'error');
+  document.getElementById('statusText').textContent = connected ? (label || 'Connected') : 'Disconnected';
+}
+
+function setLoading(on) {
+  const bar = document.getElementById('loadingBar');
+  bar.style.width = on ? '60%' : '0';
+  if (!on) setTimeout(() => { bar.style.width = '0'; }, 300);
+}
+
+function showOverlay(icon, msg, sub) {
+  const el = document.getElementById('chartOverlay');
+  el.classList.remove('hidden');
+  document.getElementById('overlayMsg').textContent = msg || '';
+  document.getElementById('overlaySub').textContent = sub || '';
+  const iconEl = el.querySelector('.overlay-icon');
+  if (iconEl) iconEl.textContent = icon || '♥';
+}
+
+function hideOverlay() {
+  document.getElementById('chartOverlay').classList.add('hidden');
+}
+
+// ── Auto-refresh ──────────────────────────────────────────────────────────────
+document.getElementById('autoRefresh').addEventListener('change', function () {
+  clearInterval(S.autoRefreshTimer);
+  if (this.checked) S.autoRefreshTimer = setInterval(loadData, 30000);
+});
+
+// ── Bootstrap ────────────────────────────────────────────────────────────────
+init();
+</script>
+</body>
+</html>
