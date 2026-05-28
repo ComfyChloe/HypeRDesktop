@@ -93,39 +93,47 @@ if (config.sqlEnabled) {
 }
 
 // ========== DATABASE OPERATIONS ==========
-// Create the unified heartrate_log table once at startup
-let dbReady = false;
-function initDb() {
+// Tracks which CODE_* tables have been confirmed created
+const readyTables = new Set();
+
+// Create the per-tracker table for a given tracker ID
+function createTableForTracker(id) {
   if (!pool) return;
-  const createQuery = `
-    CREATE TABLE IF NOT EXISTS heartrate_log (
+  const safeId = id.replace(/[^a-zA-Z0-9_]/g, '');
+  const sql = `
+    CREATE TABLE IF NOT EXISTS \`CODE_${safeId}\` (
       id          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-      tracker_id  VARCHAR(100) NOT NULL,
       recorded_at DATETIME NOT NULL,
       heart_rate  TINYINT UNSIGNED NOT NULL,
-      INDEX idx_tracker_time (tracker_id, recorded_at),
-      INDEX idx_recorded_at  (recorded_at)
+      INDEX idx_recorded_at (recorded_at)
     )
   `;
-  pool.execute(createQuery, [], (err) => {
+  pool.execute(sql, [], (err) => {
     if (err) {
-      console.error('Error creating heartrate_log table:', err);
+      console.error(`Error creating CODE_${safeId} table:`, err);
     } else {
-      dbReady = true;
-      console.log('heartrate_log table ready.');
+      readyTables.add(safeId);
+      console.log(`CODE_${safeId} table ready.`);
     }
   });
 }
-// Store heart rate data to the unified table, using DB server time
-function storeHeartRateNow(tracker_id, heartRate) {
-  if (!config.sqlEnabled || !pool || !dbReady) return;
-  if (heartRate === 0) return;
 
-  const insertSql = 'INSERT INTO heartrate_log (tracker_id, recorded_at, heart_rate) VALUES (?, NOW(), ?)';
-  pool.execute(insertSql, [tracker_id, heartRate], (err) => {
-    if (err) {
-      console.error('Error storing data:', err);
-    }
+// Create tables for all currently configured trackers at startup
+function initDb() {
+  if (!pool) return;
+  Object.keys(IDs).forEach(id => createTableForTracker(id));
+}
+
+// Store heart rate data into the per-tracker CODE_* table, using DB server time
+function storeHeartRateNow(tracker_id, heartRate) {
+  if (!config.sqlEnabled || !pool) return;
+  if (heartRate === 0) return;
+  const safeId = tracker_id.replace(/[^a-zA-Z0-9_]/g, '');
+  if (!readyTables.has(safeId)) return; // table not yet confirmed ready
+
+  const sql = `INSERT INTO \`CODE_${safeId}\` (recorded_at, heart_rate) VALUES (NOW(), ?)`;
+  pool.execute(sql, [heartRate], (err) => {
+    if (err) console.error(`Error storing data for ${safeId}:`, err);
   });
 }
 // ========== TRACKER STATE MANAGEMENT ==========
@@ -232,6 +240,7 @@ function addHeartRateTracker(ID, name) {
     };
     config.trackers.push({ id: ID, name });
     saveConfig(config);
+    createTableForTracker(ID); // ensure table exists for new tracker
   }
   console.log(`Adding new heart rate tracker: ${ID} (${name})`);
 
