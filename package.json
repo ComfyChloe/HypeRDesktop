@@ -13,7 +13,9 @@
     "start": "electron-forge start",
     "package": "electron-forge package",
     "make": "electron-forge make",
-    "dist": "electron-builder --win --x64"
+    "dist": "electron-builder --win --x64",
+    "migrate": "node migrate.js",
+    "transform": "node transform-dump.js"
   },
   "devDependencies": {
     "@electron-forge/cli": "^6.0.4",
@@ -30,7 +32,6 @@
   },
   "dependencies": {
     "electron-squirrel-startup": "^1.0.0",
-    "JSON": "^1.0.0",
     "mysql2": "^3.11.5",
     "websocket": "^1.0.35",
     "ws": "^8.18.0",

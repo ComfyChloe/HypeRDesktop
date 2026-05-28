@@ -9,8 +9,6 @@ const fs = require('fs');
 const path = require('path');
 // Import WebSocket client for real-time communication with HypeRate API
 const WebSocketClient = require('websocket').client;
-// Import JSON library for parsing
-const JSONlib = require('JSON');
 // Import MySQL library for database operations
 const mysql = require('mysql2');
 
@@ -50,7 +48,7 @@ try {
     console.log("Created default config.json (SQL disabled by default).");
   }
   const rawConfig = fs.readFileSync(configPath, 'utf8');
-  config = JSONlib.parse(rawConfig);
+  config = JSON.parse(rawConfig);
 
   // Validate and fix config values if they're invalid
   if (!Array.isArray(config.trackers)) {
@@ -81,10 +79,13 @@ let pool = null;
 if (config.sqlEnabled) {
   pool = mysql.createPool({
     host: config.dbHost,
-    port: config.dbPort,
+    port: parseInt(config.dbPort, 10) || 3306,
     user: config.dbUser,
     password: config.dbPassword,
-    database: config.dbName
+    database: config.dbName,
+    waitForConnections: true,
+    connectionLimit: 5,
+    queueLimit: 0
   });
   console.log("SQL Enabled. Connecting to DB:", config.dbHost, config.dbName);
 } else {
@@ -92,36 +93,39 @@ if (config.sqlEnabled) {
 }
 
 // ========== DATABASE OPERATIONS ==========
-// Create a table for a specific tracker if it doesn't exist
-function createTableForTracker(tracker_id, callback) {
+// Create the unified heartrate_log table once at startup
+let dbReady = false;
+function initDb() {
   if (!pool) return;
-  const safeTableName = `CODE_${tracker_id.replace(/[^a-zA-Z0-9_]/g, '')}`;
   const createQuery = `
-    CREATE TABLE IF NOT EXISTS \`${safeTableName}\` (
-      time_text VARCHAR(20) NOT NULL,
-      heart_rate TINYINT UNSIGNED NOT NULL
-    );
+    CREATE TABLE IF NOT EXISTS heartrate_log (
+      id          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      tracker_id  VARCHAR(100) NOT NULL,
+      recorded_at DATETIME NOT NULL,
+      heart_rate  TINYINT UNSIGNED NOT NULL,
+      INDEX idx_tracker_time (tracker_id, recorded_at),
+      INDEX idx_recorded_at  (recorded_at)
+    )
   `;
   pool.execute(createQuery, [], (err) => {
     if (err) {
-      console.error(`Error creating table ${safeTableName}:`, err);
-      return;
+      console.error('Error creating heartrate_log table:', err);
+    } else {
+      dbReady = true;
+      console.log('heartrate_log table ready.');
     }
-    if (typeof callback === 'function') callback(safeTableName);
   });
 }
-// Store heart rate data to database immediately
-function storeHeartRateNow(tracker_id, heartRate, timeText) {
-  if (!config.sqlEnabled || !pool) return;
-  if (heartRate === 0) return;  
+// Store heart rate data to the unified table, using DB server time
+function storeHeartRateNow(tracker_id, heartRate) {
+  if (!config.sqlEnabled || !pool || !dbReady) return;
+  if (heartRate === 0) return;
 
-  createTableForTracker(tracker_id, (tableName) => {
-    const insertSql = `INSERT INTO \`${tableName}\` (time_text, heart_rate) VALUES (?, ?)`;
-    pool.execute(insertSql, [timeText, heartRate], (err) => {
-      if (err) {
-        console.error('Error storing data:', err);
-      }
-    });
+  const insertSql = 'INSERT INTO heartrate_log (tracker_id, recorded_at, heart_rate) VALUES (?, NOW(), ?)';
+  pool.execute(insertSql, [tracker_id, heartRate], (err) => {
+    if (err) {
+      console.error('Error storing data:', err);
+    }
   });
 }
 // ========== TRACKER STATE MANAGEMENT ==========
@@ -136,31 +140,12 @@ config.trackers.forEach(tracker => {
   };
 });
 
-// ========== TIME FORMATTING ==========
-// Build time text for database entries (optimized to only include date when it changes)
-let lastDay = "";
-function buildTimeText() {
-  const now = new Date();
-  const isoStr = now.toISOString();
-  const datePart = isoStr.slice(0, 10);   // YYYY-MM-DD
-  const timePart = isoStr.slice(11, 19);  // HH:MM:SS
-
-  if (datePart !== lastDay) {
-    lastDay = datePart; 
-    return `${datePart} ${timePart}`;
-  } else {
-    return timePart;
-  }
-}
-
 // ========== PERIODIC DATABASE WRITES ==========
 // Start interval timer to periodically write heart rate data to database
 function startDbTimer() {
   const ms = config.dbWriteIntervalMs || 2000;
   setInterval(() => {
-    const timeText = buildTimeText();
     const now = Date.now();
-
     Object.keys(IDs).forEach((ID) => {
       const hr = IDs[ID].lastHeartrate;
       if (hr === 0) return;
@@ -171,7 +156,7 @@ function startDbTimer() {
         return;
       }
 
-      storeHeartRateNow(ID, hr, timeText);
+      storeHeartRateNow(ID, hr);
     });
   }, ms);
 }
@@ -284,7 +269,8 @@ function createWindow() {
 // Initialize app when Electron is ready
 app.whenReady().then(() => {
   createWindow();
-  startDbTimer(); // Storing data on a global timer
+  initDb();         // Create/verify DB table once at startup
+  startDbTimer();   // Periodically write heart rate data to DB
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -342,7 +328,7 @@ client.on('connect', function (connection) {
       return console.error("Message is not UTF8");
     }
     try {
-      const data = JSONlib.parse(message.utf8Data);
+      const data = JSON.parse(message.utf8Data);
       onMessage(data);
     } catch (err) {
       console.error("Parse error:", err);
