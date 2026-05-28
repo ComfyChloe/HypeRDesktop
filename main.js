@@ -183,9 +183,63 @@ function scheduleReconnect(reason) {
     }, 10000);
   }
 }
+
+// ========== CHANNEL WATCHDOG ==========
+// HypeRate has a backend bug that silently drops hr: channels without closing the WebSocket.
+// This watchdog re-joins all channels if no hr_update has been received for 3 minutes.
+// After 2 consecutive failed rejoins it forces a full WS reconnect.
+const CHANNEL_STALE_MS = 3 * 60 * 1000; // 3 minutes without data = stale
+let lastHrUpdateTime = 0;
+let watchdogRejoinCount = 0;
+
+function rejoinAllChannels() {
+  console.log('Watchdog: re-joining all tracker channels...');
+  Object.keys(IDs).forEach(ID => joinTrackerChannel(ID));
+}
+
+function startChannelWatchdog() {
+  // First check after 30 s to catch immediate join failures;
+  // then every 60 s so we react within a minute of channels going silent.
+  setTimeout(function doCheck() {
+    const trackerCount = Object.keys(IDs).length;
+    if (trackerCount === 0) {
+      setTimeout(doCheck, 60 * 1000);
+      return;
+    }
+    if (!connectionSocket || !connectionSocket.connected) {
+      console.log('Watchdog: socket not connected, scheduling reconnect');
+      watchdogRejoinCount = 0;
+      scheduleReconnect('channel watchdog — socket not connected');
+    } else {
+      const elapsed = Date.now() - lastHrUpdateTime;
+      const stale = lastHrUpdateTime === 0 || elapsed > CHANNEL_STALE_MS;
+      if (stale) {
+        watchdogRejoinCount++;
+        const sinceStr = lastHrUpdateTime === 0 ? 'never' : `${Math.round(elapsed / 1000)}s ago`;
+        if (watchdogRejoinCount >= 2) {
+          // Two rejoins didn’t help — force a full WS reconnect
+          console.log(`Watchdog: ${watchdogRejoinCount} rejoins with no data — forcing full reconnect`);
+          watchdogRejoinCount = 0;
+          if (connectionSocket && connectionSocket.connected) connectionSocket.close();
+        } else {
+          console.log(`Watchdog: last hr_update ${sinceStr} — re-joining ${trackerCount} channel(s) (attempt ${watchdogRejoinCount})`);
+          rejoinAllChannels();
+        }
+      } else {
+        watchdogRejoinCount = 0; // live data flowing, reset counter
+      }
+    }
+    setTimeout(doCheck, 60 * 1000);
+  }, 30 * 1000);
+}
 // ========== WEBSOCKET CONNECTION SETUP ==========
 // HypeRate API configuration and connection variables
-const API_KEY = "";
+let secrets = {};
+try {
+  const secretsPath = path.join(__dirname, 'secrets.json');
+  secrets = JSON.parse(fs.readFileSync(secretsPath, 'utf8'));
+} catch (_) { /* secrets.json absent or invalid — API key stays empty */ }
+const API_KEY = secrets?.hyperate?.apiKey ?? "";
 const API_URL = `wss://app.hyperate.io/socket/websocket?token=${API_KEY}`;
 const client = new WebSocketClient();
 let mainWindow = null;
@@ -206,6 +260,8 @@ function onHrUpdate(data) {
   const heartRate = data.payload.hr;
   if (!IDs[ID]) return;
 
+  lastHrUpdateTime = Date.now(); // watchdog: record receipt time
+  watchdogRejoinCount = 0;       // watchdog: live data flowing, reset rejoin counter
   if (heartRate !== IDs[ID].lastHeartrate) {
     IDs[ID].lastChanged = Date.now();
     IDs[ID].lastHeartrate = heartRate;
@@ -290,6 +346,12 @@ function createWindow() {
 
   mainWindow.loadFile('index.html');
 
+  // Send initial tracker state as soon as the renderer is ready so widgets
+  // appear immediately, before any WebSocket data arrives
+  mainWindow.webContents.once('did-finish-load', () => {
+    mainWindow.webContents.send("update-heart-rate", IDs);
+  });
+
   console.log("Connecting to HypeRate...");
   client.connect(API_URL);
 }
@@ -297,8 +359,9 @@ function createWindow() {
 // Initialize app when Electron is ready
 app.whenReady().then(() => {
   createWindow();
-  initDb();         // Create/verify DB table once at startup
-  startDbTimer();   // Periodically write heart rate data to DB
+  initDb();              // Create/verify DB table once at startup
+  startDbTimer();        // Periodically write heart rate data to DB
+  startChannelWatchdog(); // Re-join channels if HypeRate silently drops them
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

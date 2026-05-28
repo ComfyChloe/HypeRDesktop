@@ -6,6 +6,7 @@
 /.vs/HypeRate_Desktop/node_modules
 /node_modules
 /dist
+secrets.json
 **/.vs
 tasks.json
 .vs
