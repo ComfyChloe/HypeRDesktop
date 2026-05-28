@@ -14,5 +14,6 @@ window.addEventListener('DOMContentLoaded', () => {
 contextBridge.exposeInMainWorld("api", {
     close: () => ipcRenderer.send("close-app"),
     addTracker: (ID, name) => ipcRenderer.send("add-tracker", { ID, name }),
+    removeTracker: (ID) => ipcRenderer.send("remove-tracker", { ID }),
     onHeartRateUpdate: (callback) => ipcRenderer.on('update-heart-rate', callback),
 })

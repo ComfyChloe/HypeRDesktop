@@ -148,7 +148,7 @@
     }
     .legend-item { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text2); }
     .legend-dot { width: 10px; height: 3px; border-radius: 2px; }
-    #chartContainer { flex: 1; width: 100%; }
+    #chartContainer { position: absolute; inset: 0; }
     #tooltip {
       position: absolute; display: none; pointer-events: none; z-index: 100;
       background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius);
@@ -531,22 +531,25 @@ async function loadData() {
 // ── Chart ─────────────────────────────────────────────────────────────────────
 function initChart() {
   const container = document.getElementById('chartContainer');
+  const area = document.getElementById('chartArea');
   S.chart = LightweightCharts.createChart(container, {
-    width: container.clientWidth,
-    height: 0, // will be sized by CSS flex
+    width: area.clientWidth || 800,
+    height: area.clientHeight || 400,
     layout: { background: { color: '#0d1117' }, textColor: '#8b949e' },
     grid: { vertLines: { color: '#21262d' }, horzLines: { color: '#21262d' } },
     crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
     rightPriceScale: { borderColor: '#30363d' },
     timeScale: { borderColor: '#30363d', timeVisible: true, secondsVisible: true },
   });
-  // Make chart fill its container height
+  // Observe the stable parent, not the chart-managed container (avoids resize feedback loop)
   const ro = new ResizeObserver(entries => {
     for (const e of entries) {
       S.chart.applyOptions({ width: e.contentRect.width, height: e.contentRect.height });
+      // Re-fit time scale after resize so loaded data stays visible
+      if (S.rawSeries || S.avgSeries) S.chart.timeScale().fitContent();
     }
   });
-  ro.observe(container);
+  ro.observe(area);
   // Crosshair tooltip
   const tooltip = document.getElementById('tooltip');
   S.chart.subscribeCrosshairMove(param => {
@@ -586,6 +589,7 @@ function clearSeries() {
   document.getElementById('chartLegend').innerHTML = '';
 }
 
+
 function renderChart(hrData) {
   clearSeries();
   if (!hrData.data || hrData.data.length === 0) {
@@ -594,16 +598,27 @@ function renderChart(hrData) {
   }
   const legend = document.getElementById('chartLegend');
   if (hrData.mode === 'raw') {
+    // Deduplicate and floor timestamps — LW Charts requires unique ascending integers
+    const seen = new Set();
+    const clean = hrData.data.reduce((acc, d) => {
+      const t = Math.floor(d.time);
+      if (!seen.has(t)) { seen.add(t); acc.push({ time: t, value: Number(d.value) }); }
+      return acc;
+    }, []);
     S.rawSeries = S.chart.addLineSeries({
       color: '#f85149', lineWidth: 1,
       priceLineVisible: false, lastValueVisible: true,
     });
-    S.rawSeries.setData(hrData.data);
+    try { S.rawSeries.setData(clean); } catch (e) { console.error('setData (raw):', e); }
     legend.innerHTML = '<div class="legend-item"><div class="legend-dot" style="background:#f85149"></div>Heart Rate</div>';
-    document.getElementById('rowNote').textContent = hrData.data.length === 10000
-      ? '⚠ Capped at 10,000 raw points — use 5 min interval for larger ranges'
-      : `${hrData.data.length.toLocaleString()} raw readings`;
+    const origLen = hrData.data.length;
+    const capNote = origLen >= 10000 ? ' ⚠ Capped at 10,000 raw points — use 5 min interval for larger ranges' : '';
+    document.getElementById('rowNote').textContent = `${origLen.toLocaleString()} raw readings${capNote ? ' — ' + capNote : ''}`;
   } else {
+    // Floor timestamps for aggregated series
+    const avg = hrData.data.map(d => ({ time: Math.floor(d.time), value: d.avg }));
+    const max = hrData.data.map(d => ({ time: Math.floor(d.time), value: d.max }));
+    const min = hrData.data.map(d => ({ time: Math.floor(d.time), value: d.min }));
     S.maxSeries = S.chart.addLineSeries({
       color: '#58a6ff', lineWidth: 1,
       lineStyle: LightweightCharts.LineStyle.Dashed,
@@ -618,12 +633,11 @@ function renderChart(hrData) {
       lineStyle: LightweightCharts.LineStyle.Dashed,
       priceLineVisible: false, lastValueVisible: false,
     });
-    const avg = hrData.data.map(d => ({ time: d.time, value: d.avg }));
-    const max = hrData.data.map(d => ({ time: d.time, value: d.max }));
-    const min = hrData.data.map(d => ({ time: d.time, value: d.min }));
-    S.avgSeries.setData(avg);
-    S.maxSeries.setData(max);
-    S.minSeries.setData(min);
+    try {
+      S.avgSeries.setData(avg);
+      S.maxSeries.setData(max);
+      S.minSeries.setData(min);
+    } catch (e) { console.error('setData (agg):', e); }
     const iv = hrData.interval;
     legend.innerHTML = `
       <div class="legend-item"><div class="legend-dot" style="background:#58a6ff;height:1px;border-top:1px dashed #58a6ff"></div>Max</div>
@@ -631,7 +645,9 @@ function renderChart(hrData) {
       <div class="legend-item"><div class="legend-dot" style="background:#3fb950;height:1px;border-top:1px dashed #3fb950"></div>Min</div>`;
     document.getElementById('rowNote').textContent = `${hrData.data.length.toLocaleString()} ${iv} buckets`;
   }
+  // Call fitContent twice: immediately + after any pending resize callback settles
   S.chart.timeScale().fitContent();
+  setTimeout(() => S.chart.timeScale().fitContent(), 60);
   hideOverlay();
 }
 

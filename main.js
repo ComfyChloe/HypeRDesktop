@@ -248,6 +248,24 @@ function addHeartRateTracker(ID, name) {
     joinTrackerChannel(ID);
   }
 }
+function removeHeartRateTracker(ID) {
+  if (!IDs[ID]) return;
+  if (connectionSocket && connectionSocket.connected) {
+    connectionSocket.sendUTF(JSON.stringify({
+      topic: `hr:${ID}`,
+      event: "phx_leave",
+      payload: {},
+      ref: 0
+    }));
+  }
+  delete IDs[ID];
+  config.trackers = config.trackers.filter(t => t.id !== ID);
+  saveConfig(config);
+  if (mainWindow) {
+    mainWindow.webContents.send("update-heart-rate", { ...IDs });
+  }
+  console.log(`Removed tracker: ${ID}`);
+}
 // ========== ELECTRON WINDOW SETUP ==========
 // Create the main application window with transparent overlay settings
 function createWindow() {
@@ -268,6 +286,7 @@ function createWindow() {
   // Set up IPC (Inter-Process Communication) handlers
   ipcMain.on("close-app", () => mainWindow.close());
   ipcMain.on("add-tracker", (event, data) => addHeartRateTracker(data.ID, data.name));
+  ipcMain.on("remove-tracker", (event, data) => removeHeartRateTracker(data.ID));
 
   mainWindow.loadFile('index.html');
 
