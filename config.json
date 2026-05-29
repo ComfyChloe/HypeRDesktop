@@ -1,0 +1,16 @@
+{
+  "sqlEnabled": false,
+  "dbHost": "",
+  "dbPort": "3306",
+  "dbUser": "",
+  "dbPassword": "",
+  "dbName": "heartmonitor",
+  "dbWriteIntervalMs": 2000,
+  "staleThresholdMs": 8000,
+  "trackers": [
+    {
+      "id": "K7f",
+      "name": "Chloe"
+    }
+  ]
+}

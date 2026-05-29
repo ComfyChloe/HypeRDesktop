@@ -1,3 +1,9 @@
+## Rust re-write
+Same appication but re-written in rust for single .exe launch.
+
+
+
+
 # Hyperate-Desktop
 
 Hyperate Desktop is an application built using the Electron framework that allows users to monitor multiple heart rates simultaneously like your own heart rate, as well as the heart rate of your friends. The application has a minimalistic design, with a transparent background that allows users to focus on the heart rate data.
