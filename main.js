@@ -1,102 +1,84 @@
-// ========== MODULE IMPORTS ==========
-// Import Electron modules for creating the desktop application
 const { app, BrowserWindow, ipcMain } = require('electron');
-// Handle Squirrel events on Windows (auto-updater)
 if (require('electron-squirrel-startup')) app.quit();
 
-// Import Node.js file system and path modules
-const fs = require('fs');
+const fs   = require('fs');
 const path = require('path');
-// Import WebSocket client for real-time communication with HypeRate API
 const WebSocketClient = require('websocket').client;
-// Import MySQL library for database operations
 const mysql = require('mysql2');
 
-// ========== CONFIGURATION ==========
-// Default configuration settings for the application
-const defaultConfig = {
-  sqlEnabled: false,
-  dbHost: "",
-  dbPort: "3306",
-  dbUser: "",
-  dbPassword: "",
-  dbName: "heartmonitor",
-  dbWriteIntervalMs: 2000,  // 2s
-  staleThresholdMs: 8000,   // 8s
-  trackers: []
-};
+// ── Secrets ───────────────────────────────────────────────────────────────────
+// secrets.json lives next to the source and is never committed to git.
+let secrets = {};
+try {
+  secrets = JSON.parse(fs.readFileSync(path.join(__dirname, 'secrets.json'), 'utf8'));
+} catch (_) { /* absent or invalid — API key falls back to empty string */ }
 
-// Configuration file path (stored next to the executable)
+// ── Configuration ─────────────────────────────────────────────────────────────
 const configPath = path.join(path.dirname(process.execPath), 'config.json');
 
-// ========== CONFIG FILE MANAGEMENT ==========
-// Load configuration from file or use defaults
+const defaultConfig = {
+  sqlEnabled:        false,
+  dbHost:            '',
+  dbPort:            '3306',
+  dbUser:            '',
+  dbPassword:        '',
+  dbName:            'heartmonitor',
+  dbWriteIntervalMs: 2000,  // how often to write the latest heart rate to DB
+  staleThresholdMs:  8000,  // readings older than this are skipped on DB write
+  trackers:          [],
+};
+
 let config = { ...defaultConfig };
-// Function to save configuration to disk
+
 function saveConfig(cfg) {
   try {
     fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2));
-    console.log("Config saved successfully.");
   } catch (err) {
     console.error('Failed to write config.json:', err);
   }
 }
-// Load and validate configuration from file
+
 try {
   if (!fs.existsSync(configPath)) {
     fs.writeFileSync(configPath, JSON.stringify(defaultConfig, null, 2));
-    console.log("Created default config.json (SQL disabled by default).");
+    console.log('Created default config.json.');
   }
-  const rawConfig = fs.readFileSync(configPath, 'utf8');
-  config = JSON.parse(rawConfig);
-
-  // Validate and fix config values if they're invalid
-  if (!Array.isArray(config.trackers)) {
-    config.trackers = [];
-  }
-  if (
-    typeof config.dbWriteIntervalMs !== 'number' ||
-    isNaN(config.dbWriteIntervalMs) ||
-    config.dbWriteIntervalMs < 1
-  ) {
+  config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  if (!Array.isArray(config.trackers)) config.trackers = [];
+  if (typeof config.dbWriteIntervalMs !== 'number' || config.dbWriteIntervalMs < 1)
     config.dbWriteIntervalMs = defaultConfig.dbWriteIntervalMs;
-  }
-  if (
-    typeof config.staleThresholdMs !== 'number' ||
-    isNaN(config.staleThresholdMs) ||
-    config.staleThresholdMs < 1
-  ) {
+  if (typeof config.staleThresholdMs !== 'number' || config.staleThresholdMs < 1)
     config.staleThresholdMs = defaultConfig.staleThresholdMs;
-  }
 } catch (err) {
   console.warn('Failed to load config.json; using defaults:', err);
   config = { ...defaultConfig };
 }
 
-// ========== DATABASE CONNECTION ==========
-// Initialize MySQL connection pool if SQL is enabled
+// ── Database ──────────────────────────────────────────────────────────────────
+// Each tracker gets its own CODE_<id> table created on first use.
+// startDbTimer() samples the in-memory heart rate at dbWriteIntervalMs and
+// writes to the DB only when the reading is still fresh (within staleThresholdMs).
+
 let pool = null;
 if (config.sqlEnabled) {
   pool = mysql.createPool({
-    host: config.dbHost,
-    port: parseInt(config.dbPort, 10) || 3306,
-    user: config.dbUser,
-    password: config.dbPassword,
-    database: config.dbName,
+    host:               config.dbHost,
+    port:               parseInt(config.dbPort, 10) || 3306,
+    user:               config.dbUser,
+    password:           config.dbPassword,
+    database:           config.dbName,
     waitForConnections: true,
-    connectionLimit: 5,
-    queueLimit: 0
+    connectionLimit:    5,
+    queueLimit:         0,
   });
-  console.log("SQL Enabled. Connecting to DB:", config.dbHost, config.dbName);
+  console.log(`SQL enabled — ${config.dbHost}/${config.dbName}`);
 } else {
-  console.log("SQL logging disabled (sqlEnabled=false).");
+  console.log('SQL logging disabled.');
 }
 
-// ========== DATABASE OPERATIONS ==========
-// Tracks which CODE_* tables have been confirmed created
+// Set of tracker IDs whose CODE_* table has been confirmed to exist this session.
 const readyTables = new Set();
 
-// Create the per-tracker table for a given tracker ID
 function createTableForTracker(id) {
   if (!pool) return;
   const safeId = id.replace(/[^a-zA-Z0-9_]/g, '');
@@ -106,328 +88,254 @@ function createTableForTracker(id) {
       recorded_at DATETIME NOT NULL,
       heart_rate  TINYINT UNSIGNED NOT NULL,
       INDEX idx_recorded_at (recorded_at)
-    )
-  `;
+    )`;
   pool.execute(sql, [], (err) => {
-    if (err) {
-      console.error(`Error creating CODE_${safeId} table:`, err);
-    } else {
-      readyTables.add(safeId);
-      console.log(`CODE_${safeId} table ready.`);
-    }
+    if (err) return console.error(`Error creating CODE_${safeId} table:`, err);
+    readyTables.add(safeId);
+    console.log(`CODE_${safeId} table ready.`);
   });
 }
 
-// Create tables for all currently configured trackers at startup
+function storeHeartRateNow(trackerId, heartRate) {
+  if (!config.sqlEnabled || !pool || heartRate === 0) return;
+  const safeId = trackerId.replace(/[^a-zA-Z0-9_]/g, '');
+  if (!readyTables.has(safeId)) return;
+  pool.execute(
+    `INSERT INTO \`CODE_${safeId}\` (recorded_at, heart_rate) VALUES (NOW(), ?)`,
+    [heartRate],
+    (err) => { if (err) console.error(`DB write error for ${safeId}:`, err); }
+  );
+}
+
 function initDb() {
   if (!pool) return;
   Object.keys(IDs).forEach(id => createTableForTracker(id));
 }
 
-// Store heart rate data into the per-tracker CODE_* table, using DB server time
-function storeHeartRateNow(tracker_id, heartRate) {
-  if (!config.sqlEnabled || !pool) return;
-  if (heartRate === 0) return;
-  const safeId = tracker_id.replace(/[^a-zA-Z0-9_]/g, '');
-  if (!readyTables.has(safeId)) return; // table not yet confirmed ready
-
-  const sql = `INSERT INTO \`CODE_${safeId}\` (recorded_at, heart_rate) VALUES (NOW(), ?)`;
-  pool.execute(sql, [heartRate], (err) => {
-    if (err) console.error(`Error storing data for ${safeId}:`, err);
-  });
-}
-// ========== TRACKER STATE MANAGEMENT ==========
-// Initialize tracker data structure from config
-const IDs = {};
-config.trackers.forEach(tracker => {
-  IDs[tracker.id] = {
-    name: tracker.name,
-    lastUpdate: 0,
-    lastHeartrate: 0,
-    lastChanged: 0
-  };
-});
-
-// ========== PERIODIC DATABASE WRITES ==========
-// Start interval timer to periodically write heart rate data to database
 function startDbTimer() {
-  const ms = config.dbWriteIntervalMs || 2000;
   setInterval(() => {
     const now = Date.now();
-    Object.keys(IDs).forEach((ID) => {
-      const hr = IDs[ID].lastHeartrate;
-      if (hr === 0) return;
-
-      const timeSinceChanged = now - IDs[ID].lastChanged;
-      if (timeSinceChanged > config.staleThresholdMs) {
-        // It's stale => skip
-        return;
-      }
-
-      storeHeartRateNow(ID, hr);
+    Object.keys(IDs).forEach((id) => {
+      const { lastHeartrate, lastChanged } = IDs[id];
+      if (lastHeartrate === 0) return;
+      if (now - lastChanged > config.staleThresholdMs) return;
+      storeHeartRateNow(id, lastHeartrate);
     });
-  }, ms);
+  }, config.dbWriteIntervalMs || 2000);
 }
 
-// ========== WEBSOCKET RECONNECTION ==========
-// Handle automatic reconnection to WebSocket with backoff
-let reconnectScheduled = false;
-function scheduleReconnect(reason) {
-  if (!reconnectScheduled) {
-    reconnectScheduled = true;
-    console.log(`Scheduling reconnect in 10 seconds due to: ${reason}`);
-    setTimeout(() => {
-      reconnectScheduled = false;
-      console.log("Attempting reconnection now...");
-      client.connect(API_URL);
-    }, 10000);
+// ── Tracker state ─────────────────────────────────────────────────────────────
+// IDs is the in-memory source of truth. The renderer receives a copy on every change.
+
+const IDs = {};
+config.trackers.forEach(({ id, name }) => {
+  IDs[id] = { name, lastUpdate: 0, lastHeartrate: 0, lastChanged: 0 };
+});
+
+// ── WebSocket setup ───────────────────────────────────────────────────────────
+const API_KEY = secrets?.hyperate?.apiKey ?? '';
+const API_URL = `wss://app.hyperate.io/socket/websocket?token=${API_KEY}`;
+const client  = new WebSocketClient();
+
+let mainWindow        = null;
+let connectionSocket  = null;
+let heartbeatInterval = null;
+
+// ── Message handling ──────────────────────────────────────────────────────────
+function onMessage(data) {
+  if (data.event === 'hr_update') onHrUpdate(data);
+}
+
+function onHrUpdate(data) {
+  const id        = data.topic.split(':')[1];
+  const heartRate = data.payload.hr;
+  if (!IDs[id]) return;
+
+  // Reset watchdog counters — live data is flowing.
+  lastHrUpdateTime    = Date.now();
+  watchdogRejoinCount = 0;
+
+  const now = Date.now();
+  if (heartRate !== IDs[id].lastHeartrate) {
+    IDs[id].lastHeartrate = heartRate;
+    IDs[id].lastChanged   = now;
   }
+  IDs[id].lastUpdate = now;
+
+  mainWindow?.webContents.send('update-heart-rate', IDs);
 }
 
-// ========== CHANNEL WATCHDOG ==========
-// HypeRate has a backend bug that silently drops hr: channels without closing the WebSocket.
-// This watchdog re-joins all channels if no hr_update has been received for 3 minutes.
-// After 2 consecutive failed rejoins it forces a full WS reconnect.
-const CHANNEL_STALE_MS = 3 * 60 * 1000; // 3 minutes without data = stale
-let lastHrUpdateTime = 0;
+// ── Channel management ────────────────────────────────────────────────────────
+function joinTrackerChannel(id) {
+  if (!connectionSocket?.connected) return;
+  connectionSocket.sendUTF(JSON.stringify({ topic: `hr:${id}`, event: 'phx_join', payload: {}, ref: 0 }));
+  console.log(`Joined channel: ${id}`);
+}
+
+function addHeartRateTracker(id, name) {
+  if (!IDs[id]) {
+    IDs[id] = { name, lastUpdate: 0, lastHeartrate: 0, lastChanged: 0 };
+    config.trackers.push({ id, name });
+    saveConfig(config);
+    createTableForTracker(id);
+  }
+  console.log(`Tracker added: ${id} (${name})`);
+  if (connectionSocket?.connected) joinTrackerChannel(id);
+}
+
+function removeHeartRateTracker(id) {
+  if (!IDs[id]) return;
+  if (connectionSocket?.connected) {
+    connectionSocket.sendUTF(JSON.stringify({ topic: `hr:${id}`, event: 'phx_leave', payload: {}, ref: 0 }));
+  }
+  delete IDs[id];
+  config.trackers = config.trackers.filter(t => t.id !== id);
+  saveConfig(config);
+  mainWindow?.webContents.send('update-heart-rate', { ...IDs });
+  console.log(`Tracker removed: ${id}`);
+}
+
+// ── Reconnection ──────────────────────────────────────────────────────────────
+let reconnectScheduled = false;
+
+function scheduleReconnect(reason) {
+  if (reconnectScheduled) return;
+  reconnectScheduled = true;
+  console.log(`Reconnect in 10 s (${reason})`);
+  setTimeout(() => {
+    reconnectScheduled = false;
+    console.log('Reconnecting...');
+    client.connect(API_URL);
+  }, 10_000);
+}
+
+// ── Channel watchdog ──────────────────────────────────────────────────────────
+// HypeRate silently drops hr: subscriptions without closing the WebSocket.
+// Every 60 s we check whether any hr_update has arrived in the last 3 minutes.
+// If not, we re-join all channels. After two failed rejoins we force a full
+// WS reconnect so the connection is reset from scratch.
+
+const CHANNEL_STALE_MS  = 3 * 60 * 1000;
+let lastHrUpdateTime    = 0;
 let watchdogRejoinCount = 0;
 
 function rejoinAllChannels() {
-  console.log('Watchdog: re-joining all tracker channels...');
-  Object.keys(IDs).forEach(ID => joinTrackerChannel(ID));
+  Object.keys(IDs).forEach(id => joinTrackerChannel(id));
 }
 
 function startChannelWatchdog() {
-  // First check after 30 s to catch immediate join failures;
-  // then every 60 s so we react within a minute of channels going silent.
+  // First check at 30 s catches immediate join failures on startup.
+  // Subsequent checks run every 60 s.
   setTimeout(function doCheck() {
-    const trackerCount = Object.keys(IDs).length;
-    if (trackerCount === 0) {
-      setTimeout(doCheck, 60 * 1000);
-      return;
-    }
-    if (!connectionSocket || !connectionSocket.connected) {
-      console.log('Watchdog: socket not connected, scheduling reconnect');
+    const count = Object.keys(IDs).length;
+    if (count === 0) { setTimeout(doCheck, 60_000); return; }
+
+    if (!connectionSocket?.connected) {
+      console.log('Watchdog: not connected — scheduling reconnect');
       watchdogRejoinCount = 0;
-      scheduleReconnect('channel watchdog — socket not connected');
+      scheduleReconnect('watchdog');
     } else {
       const elapsed = Date.now() - lastHrUpdateTime;
-      const stale = lastHrUpdateTime === 0 || elapsed > CHANNEL_STALE_MS;
+      const stale   = lastHrUpdateTime === 0 || elapsed > CHANNEL_STALE_MS;
       if (stale) {
         watchdogRejoinCount++;
-        const sinceStr = lastHrUpdateTime === 0 ? 'never' : `${Math.round(elapsed / 1000)}s ago`;
+        const since = lastHrUpdateTime === 0 ? 'never' : `${Math.round(elapsed / 1000)}s ago`;
         if (watchdogRejoinCount >= 2) {
-          // Two rejoins didn’t help — force a full WS reconnect
           console.log(`Watchdog: ${watchdogRejoinCount} rejoins with no data — forcing full reconnect`);
           watchdogRejoinCount = 0;
-          if (connectionSocket && connectionSocket.connected) connectionSocket.close();
+          connectionSocket.close();
         } else {
-          console.log(`Watchdog: last hr_update ${sinceStr} — re-joining ${trackerCount} channel(s) (attempt ${watchdogRejoinCount})`);
+          console.log(`Watchdog: last update ${since} — re-joining ${count} channel(s) (attempt ${watchdogRejoinCount})`);
           rejoinAllChannels();
         }
       } else {
-        watchdogRejoinCount = 0; // live data flowing, reset counter
+        watchdogRejoinCount = 0; // live data is flowing, all good
       }
     }
-    setTimeout(doCheck, 60 * 1000);
-  }, 30 * 1000);
-}
-// ========== WEBSOCKET CONNECTION SETUP ==========
-// HypeRate API configuration and connection variables
-let secrets = {};
-try {
-  const secretsPath = path.join(__dirname, 'secrets.json');
-  secrets = JSON.parse(fs.readFileSync(secretsPath, 'utf8'));
-} catch (_) { /* secrets.json absent or invalid — API key stays empty */ }
-const API_KEY = secrets?.hyperate?.apiKey ?? "";
-const API_URL = `wss://app.hyperate.io/socket/websocket?token=${API_KEY}`;
-const client = new WebSocketClient();
-let mainWindow = null;
-let connectionSocket = null;
-let heartbeatInterval = null;
-
-// ========== MESSAGE HANDLERS ==========
-// Handle incoming WebSocket messages
-function onMessage(data) {
-  if (data.event === "hr_update") {
-    onHrUpdate(data);
-  }
+    setTimeout(doCheck, 60_000);
+  }, 30_000);
 }
 
-// Process heart rate updates from HypeRate API
-function onHrUpdate(data) {
-  const ID = data.topic.split(":")[1];
-  const heartRate = data.payload.hr;
-  if (!IDs[ID]) return;
-
-  lastHrUpdateTime = Date.now(); // watchdog: record receipt time
-  watchdogRejoinCount = 0;       // watchdog: live data flowing, reset rejoin counter
-  if (heartRate !== IDs[ID].lastHeartrate) {
-    IDs[ID].lastChanged = Date.now();
-    IDs[ID].lastHeartrate = heartRate;
-  }
-  IDs[ID].lastUpdate = Date.now();
-
-  if (mainWindow) {
-    mainWindow.webContents.send("update-heart-rate", IDs);
-  }
-}
-// Join a specific tracker's channel on the HypeRate WebSocket
-function joinTrackerChannel(ID) {
-  if (connectionSocket && connectionSocket.connected) {
-    connectionSocket.sendUTF(JSON.stringify({
-      topic: `hr:${ID}`,
-      event: "phx_join",
-      payload: {},
-      ref: 0
-    }));
-    console.log(`Joined channel for ${ID}`);
-  }
-}
-// ========== TRACKER MANAGEMENT ==========
-// Add a new heart rate tracker and join its channel
-function addHeartRateTracker(ID, name) {
-  if (!IDs[ID]) {
-    IDs[ID] = {
-      name,
-      lastUpdate: 0,
-      lastHeartrate: 0,
-      lastChanged: 0
-    };
-    config.trackers.push({ id: ID, name });
-    saveConfig(config);
-    createTableForTracker(ID); // ensure table exists for new tracker
-  }
-  console.log(`Adding new heart rate tracker: ${ID} (${name})`);
-
-  if (connectionSocket && connectionSocket.connected) {
-    joinTrackerChannel(ID);
-  }
-}
-function removeHeartRateTracker(ID) {
-  if (!IDs[ID]) return;
-  if (connectionSocket && connectionSocket.connected) {
-    connectionSocket.sendUTF(JSON.stringify({
-      topic: `hr:${ID}`,
-      event: "phx_leave",
-      payload: {},
-      ref: 0
-    }));
-  }
-  delete IDs[ID];
-  config.trackers = config.trackers.filter(t => t.id !== ID);
-  saveConfig(config);
-  if (mainWindow) {
-    mainWindow.webContents.send("update-heart-rate", { ...IDs });
-  }
-  console.log(`Removed tracker: ${ID}`);
-}
-// ========== ELECTRON WINDOW SETUP ==========
-// Create the main application window with transparent overlay settings
+// ── Electron window ───────────────────────────────────────────────────────────
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 100,
-    height: 100,
-    frame: false,
-    resizable: false,
+    width:           100,
+    height:          100,
+    frame:           false,
+    resizable:       false,
     autoHideMenuBar: true,
-    transparent: true,
-    alwaysOnTop: true,
-    hasShadow: false,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js')
-    },
+    transparent:     true,
+    alwaysOnTop:     true,
+    hasShadow:       false,
+    webPreferences:  { preload: path.join(__dirname, 'preload.js') },
   });
 
-  // Set up IPC (Inter-Process Communication) handlers
-  ipcMain.on("close-app", () => mainWindow.close());
-  ipcMain.on("add-tracker", (event, data) => addHeartRateTracker(data.ID, data.name));
-  ipcMain.on("remove-tracker", (event, data) => removeHeartRateTracker(data.ID));
+  ipcMain.on('close-app',      ()                => mainWindow.close());
+  ipcMain.on('add-tracker',    (_, { ID, name }) => addHeartRateTracker(ID, name));
+  ipcMain.on('remove-tracker', (_, { ID })       => removeHeartRateTracker(ID));
 
   mainWindow.loadFile('index.html');
 
-  // Send initial tracker state as soon as the renderer is ready so widgets
-  // appear immediately, before any WebSocket data arrives
+  // Push initial tracker state to the renderer so all configured widgets
+  // appear immediately, without waiting for the first WebSocket update.
   mainWindow.webContents.once('did-finish-load', () => {
-    mainWindow.webContents.send("update-heart-rate", IDs);
+    mainWindow.webContents.send('update-heart-rate', IDs);
   });
 
-  console.log("Connecting to HypeRate...");
+  console.log('Connecting to HypeRate...');
   client.connect(API_URL);
 }
-// ========== APP LIFECYCLE ==========
-// Initialize app when Electron is ready
+
+// ── App lifecycle ─────────────────────────────────────────────────────────────
 app.whenReady().then(() => {
   createWindow();
-  initDb();              // Create/verify DB table once at startup
-  startDbTimer();        // Periodically write heart rate data to DB
-  startChannelWatchdog(); // Re-join channels if HypeRate silently drops them
+  initDb();
+  startDbTimer();
+  startChannelWatchdog();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
 
-// Quit when all windows are closed (except on macOS)
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-// Clean up connections before app quits
 app.on('before-quit', () => {
-  if (connectionSocket && connectionSocket.connected) {
-    connectionSocket.close();
-  }
-  if (heartbeatInterval) {
-    clearInterval(heartbeatInterval);
-  }
-});
-// ========== WEBSOCKET EVENT HANDLERS ==========
-// Handle connection failures
-client.on('connectFailed', function (error) {
-  console.log("Connect Failed:", error.toString());
-  scheduleReconnect("connectFailed");
+  connectionSocket?.close();
+  if (heartbeatInterval) clearInterval(heartbeatInterval);
 });
 
-// Handle successful WebSocket connection
-client.on('connect', function (connection) {
+// ── WebSocket event handlers ──────────────────────────────────────────────────
+client.on('connectFailed', (error) => {
+  console.error('WS connect failed:', error.toString());
+  scheduleReconnect('connectFailed');
+});
+
+client.on('connect', (connection) => {
   connectionSocket = connection;
-  console.log("Client Connected");
-  // Send periodic heartbeat to keep connection alive
+  console.log('WS connected');
+
+  // Phoenix heartbeat keeps the HypeRate connection alive.
   heartbeatInterval = setInterval(() => {
-    if (connection && connection.connected) {
-      connection.sendUTF(JSON.stringify({
-        topic: "phoenix",
-        event: "heartbeat",
-        payload: {},
-        ref: 0
-      }));
+    if (connection.connected) {
+      connection.sendUTF(JSON.stringify({ topic: 'phoenix', event: 'heartbeat', payload: {}, ref: 0 }));
     }
-  }, 30000);
+  }, 30_000);
 
-  connection.on("close", function () {
-    console.log("Connection Closed");
-    if (heartbeatInterval) {
-      clearInterval(heartbeatInterval);
-      heartbeatInterval = null;
-    }
-    scheduleReconnect("connection closed");
+  connection.on('close', () => {
+    console.log('WS connection closed');
+    clearInterval(heartbeatInterval);
+    heartbeatInterval = null;
+    scheduleReconnect('connection closed');
   });
 
-  // Handle incoming messages from WebSocket
-  connection.on("message", function (message) {
-    if (message.type !== "utf8") {
-      return console.error("Message is not UTF8");
-    }
-    try {
-      const data = JSON.parse(message.utf8Data);
-      onMessage(data);
-    } catch (err) {
-      console.error("Parse error:", err);
-    }
+  connection.on('message', (message) => {
+    if (message.type !== 'utf8') return;
+    try { onMessage(JSON.parse(message.utf8Data)); }
+    catch (err) { console.error('WS parse error:', err); }
   });
 
-  // Join channels for all configured trackers on connection
-  Object.keys(IDs).forEach((ID) => {
-    joinTrackerChannel(ID);
-  });
+  // Subscribe to every configured tracker's channel.
+  Object.keys(IDs).forEach(id => joinTrackerChannel(id));
 });
