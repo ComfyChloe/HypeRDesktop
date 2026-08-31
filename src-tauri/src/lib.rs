@@ -5,9 +5,9 @@ mod hyperate;
 mod tracker;
 
 use commands::app::{close_window, resize_window};
-use commands::tracker::{add_tracker, remove_tracker};
+use commands::tracker::{add_tracker, get_trackers, remove_tracker};
 use hyperate::new_ws_sender;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tracker::new_tracker_map;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -31,6 +31,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             add_tracker,
             remove_tracker,
+            get_trackers,
             resize_window,
             close_window,
         ])
@@ -45,6 +46,11 @@ pub fn run() {
                     let _ = window.set_size(tauri::LogicalSize::new(width, 100u32));
                 }
             }
+
+            // Emit the initial snapshot so the renderer paints known trackers
+            // (with disconnected visuals) on first paint instead of an empty UI.
+            let initial_snapshot = tracker_map.read().unwrap().clone();
+            let _ = app.emit("heart-rate-update", &initial_snapshot);
 
             // Start WS connection task
             hyperate::start_hyperate_task(

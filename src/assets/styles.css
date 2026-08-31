@@ -145,6 +145,25 @@ html:hover .panel,
   width: 100px;
 }
 
+/* Disconnected state — slow fade pulse so the user can see the tracker is
+   known but offline. Opacity oscillates between 0.2 and 0.6 on a ~3s loop. */
+.heart-rate.disconnected .heart {
+  animation: pulse-disconnected 3s ease-in-out infinite;
+}
+
+.heart-rate.disconnected .background {
+  filter: grayscale(0.85);
+}
+
+.heart-rate.disconnected .data > * {
+  color: rgba(255, 255, 255, 0.55);
+}
+
+@keyframes pulse-disconnected {
+  0%, 100% { opacity: 0.2; transform: scale(0.92); }
+  50%      { opacity: 0.6; transform: scale(1.04); }
+}
+
 .heart-rate > * {
   position: absolute;
   top: 0;

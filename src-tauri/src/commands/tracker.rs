@@ -1,8 +1,16 @@
+use std::collections::HashMap;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::config::{load_config, save_config, TrackerConfig};
 use crate::hyperate::{join_channel, leave_channel, WsSenderHandle};
 use crate::tracker::{TrackerEntry, TrackerMap};
+
+#[tauri::command]
+pub fn get_trackers(
+    trackers: State<'_, TrackerMap>,
+) -> HashMap<String, TrackerEntry> {
+    trackers.read().unwrap().clone()
+}
 
 #[tauri::command]
 pub async fn add_tracker(

@@ -22,15 +22,30 @@ const trackerIds = computed(() => Object.keys(trackers.value))
 const hasTrackers = computed(() => trackerIds.value.length > 0)
 
 let unlisten: UnlistenFn | null = null
+let lastResizedCount = -1
 
-async function updateTrackers(data: Record<string, TrackerEntry>) {
-  trackers.value = data
-  const count = Object.keys(data).length
+async function resizeTo(count: number) {
+  if (count === lastResizedCount) return
+  lastResizedCount = count
   const width = Math.max(count * 100, 100)
   await invoke('resize_window', { width, height: 100 })
 }
 
+async function updateTrackers(data: Record<string, TrackerEntry>) {
+  trackers.value = data
+  await resizeTo(Object.keys(data).length)
+}
+
 onMounted(async () => {
+  // Seed from Rust immediately so known trackers render on first paint,
+  // before any WS message arrives.
+  try {
+    const initial = await invoke<Record<string, TrackerEntry>>('get_trackers')
+    await updateTrackers(initial)
+  } catch (e) {
+    console.error('get_trackers failed:', e)
+  }
+
   unlisten = await listen<Record<string, TrackerEntry>>('heart-rate-update', (event) => {
     updateTrackers(event.payload)
   })
