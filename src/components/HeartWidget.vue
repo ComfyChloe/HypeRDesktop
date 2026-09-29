@@ -20,9 +20,11 @@ const emit = defineEmits<{
 }>()
 
 const staleMs = computed(() => Math.abs(props.tracker.lastUpdate - Date.now()))
-const isStale = computed(() => staleMs.value > 30_000)
+const isStale = computed(() => staleMs.value > 60_000)
 // Disconnected = no live data. Either we never received an update
 // (lastUpdate === 0) or the last one is older than the stale threshold.
+// 60s threshold matches the Rust watchdog's second-strike disconnect so a
+// single WS blip doesn't flip every widget to "--".
 const isDisconnected = computed(
   () => props.tracker.lastUpdate === 0 || isStale.value
 )

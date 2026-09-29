@@ -2,11 +2,12 @@ mod commands;
 mod config;
 mod db;
 mod hyperate;
+mod log;
 mod tracker;
 
 use commands::app::{close_window, resize_window};
 use commands::tracker::{add_tracker, get_trackers, remove_tracker};
-use hyperate::new_ws_sender;
+use hyperate::new_connection_map;
 use tauri::{Emitter, Manager};
 use tracker::new_tracker_map;
 
@@ -14,20 +15,32 @@ use tracker::new_tracker_map;
 pub fn run() {
     let config = config::load_config();
     let api_key = config::api_key();
+    log::log_info(&format!(
+        "HypeRDesktop starting — config has {} tracker(s), api_key present: {}",
+        config.trackers.len(),
+        !api_key.is_empty()
+    ));
 
     let tracker_map = new_tracker_map();
     {
         let mut map = tracker_map.write().unwrap();
         for t in &config.trackers {
-            map.insert(t.id.clone(), tracker::TrackerEntry::new(t.name.clone()));
+            map.entries
+                .insert(t.id.clone(), tracker::TrackerEntry::new(t.name.clone()));
+            map.order.push(t.id.clone());
         }
+        log::log_info(&format!(
+            "seeded runtime map with {} tracker(s) in config order: [{}]",
+            map.order.len(),
+            map.order.join(", ")
+        ));
     }
 
-    let ws_sender = new_ws_sender();
+    let connections = new_connection_map();
 
     tauri::Builder::default()
         .manage(tracker_map.clone())
-        .manage(ws_sender.clone())
+        .manage(connections.clone())
         .invoke_handler(tauri::generate_handler![
             add_tracker,
             remove_tracker,
@@ -39,7 +52,7 @@ pub fn run() {
             let app_handle = app.handle().clone();
 
             // Set initial window size based on loaded tracker count
-            let tracker_count = tracker_map.read().unwrap().len();
+            let tracker_count = tracker_map.read().unwrap().entries.len();
             if tracker_count > 0 {
                 if let Some(window) = app.get_webview_window("main") {
                     let width = (tracker_count * 100).max(100) as u32;
@@ -49,15 +62,21 @@ pub fn run() {
 
             // Emit the initial snapshot so the renderer paints known trackers
             // (with disconnected visuals) on first paint instead of an empty UI.
-            let initial_snapshot = tracker_map.read().unwrap().clone();
+            let initial_snapshot = tracker::snapshot_ordered(&tracker_map.read().unwrap());
+            log::log_info(&format!(
+                "emitting initial snapshot with {} tracker(s)",
+                initial_snapshot.len()
+            ));
             let _ = app.emit("heart-rate-update", &initial_snapshot);
 
-            // Start WS connection task
+            // Start one WS connection per tracker (HypeRate's Phoenix Channels
+            // backend only delivers hr_update to a single subscribed topic per
+            // socket, so multi-tracker support requires one connection each).
             hyperate::start_hyperate_task(
                 api_key,
                 tracker_map.clone(),
-                ws_sender.clone(),
                 app_handle.clone(),
+                connections.clone(),
             );
 
             // Start DB timer (async: create pool first, then start timer)

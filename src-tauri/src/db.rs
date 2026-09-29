@@ -50,7 +50,7 @@ async fn create_table(pool: &MySqlPool, id: &str) -> bool {
 }
 
 pub async fn init_tables(pool: &MySqlPool, trackers: &TrackerMap) {
-    let ids: Vec<String> = trackers.read().unwrap().keys().cloned().collect();
+    let ids: Vec<String> = trackers.read().unwrap().entries.keys().cloned().collect();
     for id in ids {
         create_table(pool, &id).await;
     }
@@ -73,6 +73,7 @@ pub fn start_db_timer(pool: Option<MySqlPool>, trackers: TrackerMap, config: Con
 
             let snapshot: Vec<(String, u8)> = {
                 trackers.read().unwrap()
+                    .entries
                     .iter()
                     .filter_map(|(id, entry)| {
                         if entry.last_heartrate == 0 { return None; }

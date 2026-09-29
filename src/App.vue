@@ -4,22 +4,26 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import HeartWidget from './components/HeartWidget.vue'
 
-interface TrackerEntry {
+// The Rust side emits TrackerSnapshot[] — an ordered array of { id, ...entry }
+// — so config.json order is preserved end-to-end. Iterating a plain array
+// (rather than Object.keys on a Record) gives us a deterministic render
+// order across runs.
+interface TrackerSnapshot {
+  id: string
   name: string
   lastUpdate: number
   lastHeartrate: number
   lastChanged: number
 }
 
-const trackers = ref<Record<string, TrackerEntry>>({})
+const trackers = ref<TrackerSnapshot[]>([])
 const shiftHeld = ref(false)
 const opacityValue = ref(8)
 const addId = ref('')
 const addName = ref('')
 
 const opacityClass = computed(() => `opacity-${opacityValue.value}`)
-const trackerIds = computed(() => Object.keys(trackers.value))
-const hasTrackers = computed(() => trackerIds.value.length > 0)
+const hasTrackers = computed(() => trackers.value.length > 0)
 
 let unlisten: UnlistenFn | null = null
 let lastResizedCount = -1
@@ -31,22 +35,22 @@ async function resizeTo(count: number) {
   await invoke('resize_window', { width, height: 100 })
 }
 
-async function updateTrackers(data: Record<string, TrackerEntry>) {
+async function updateTrackers(data: TrackerSnapshot[]) {
   trackers.value = data
-  await resizeTo(Object.keys(data).length)
+  await resizeTo(data.length)
 }
 
 onMounted(async () => {
   // Seed from Rust immediately so known trackers render on first paint,
   // before any WS message arrives.
   try {
-    const initial = await invoke<Record<string, TrackerEntry>>('get_trackers')
+    const initial = await invoke<TrackerSnapshot[]>('get_trackers')
     await updateTrackers(initial)
   } catch (e) {
     console.error('get_trackers failed:', e)
   }
 
-  unlisten = await listen<Record<string, TrackerEntry>>('heart-rate-update', (event) => {
+  unlisten = await listen<TrackerSnapshot[]>('heart-rate-update', (event) => {
     updateTrackers(event.payload)
   })
 })
@@ -89,10 +93,10 @@ function closeWindow() {
 <template>
   <div id="app" :class="{ 'force-hover': !hasTrackers }">
     <HeartWidget
-      v-for="id in trackerIds"
-      :key="id"
-      :id="id"
-      :tracker="trackers[id]"
+      v-for="entry in trackers"
+      :key="entry.id"
+      :id="entry.id"
+      :tracker="entry"
       :opacity-class="opacityClass"
       :shift-held="shiftHeld"
       @remove="removeTracker"
