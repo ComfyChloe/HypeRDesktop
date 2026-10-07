@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-
-interface TrackerEntry {
-  name: string
-  lastUpdate: number
-  lastHeartrate: number
-  lastChanged: number
-}
+import { computed, onUnmounted, ref } from 'vue'
+import {
+  heartDisplay as computeHeartDisplay,
+  isDisconnected as computeIsDisconnected,
+  isStale as computeIsStale,
+  staleText as computeStaleText,
+  type TrackerEntry,
+} from '../lib/trackerDisplay'
 
 const props = defineProps<{
   id: string
@@ -19,23 +19,30 @@ const emit = defineEmits<{
   remove: [id: string]
 }>()
 
-const staleMs = computed(() => Math.abs(props.tracker.lastUpdate - Date.now()))
-const isStale = computed(() => staleMs.value > 60_000)
-// Disconnected = no live data. Either we never received an update
-// (lastUpdate === 0) or the last one is older than the stale threshold.
-// 60s threshold matches the Rust watchdog's second-strike disconnect so a
-// single WS blip doesn't flip every widget to "--".
-const isDisconnected = computed(
-  () => props.tracker.lastUpdate === 0 || isStale.value
-)
-const staleText = computed(() =>
-  staleMs.value < 5 * 60_000
-    ? `${Math.floor(staleMs.value / 1000)}s ago`
-    : 'a while ago'
-)
-const heartDisplay = computed(() =>
-  isDisconnected.value ? '--' : props.tracker.lastHeartrate
-)
+// All four rules live in `lib/trackerDisplay.ts` so their thresholds are
+// unit-tested. They are time-dependent, so a ticking clock keeps the
+// widget honest without the parent re-sending a snapshot every second —
+// the Rust side emits on data change only, so a stale widget would
+// otherwise keep claiming to be live indefinitely.
+const now = ref(Date.now())
+const timer = setInterval(() => {
+  now.value = Date.now()
+}, 1000)
+onUnmounted(() => clearInterval(timer))
+
+const isStale = computed(() => computeIsStale(props.tracker, now.value))
+const isDisconnected = computed(() => computeIsDisconnected(props.tracker, now.value))
+const staleText = computed(() => computeStaleText(props.tracker, now.value))
+const heartDisplay = computed(() => computeHeartDisplay(props.tracker, now.value))
+
+// The remove button is only *visually* hidden until shift is held. Without
+// this guard it stays clickable, so an ordinary click anywhere on the
+// transparent widget would delete a tracker — the overlay sits over other
+// windows, so stray clicks are expected rather than exceptional.
+function onRemove() {
+  if (!props.shiftHeld) return
+  emit('remove', props.id)
+}
 </script>
 
 <template>
@@ -48,6 +55,10 @@ const heartDisplay = computed(() =>
       <div class="heart_rate">{{ heartDisplay }}</div>
       <div class="last_update" :class="{ hidden: !isStale }">{{ staleText }}</div>
     </div>
-    <div class="remove-btn" :class="{ visible: shiftHeld }" @click.stop="emit('remove', id)">✕</div>
+    <div
+      class="remove-btn"
+      :class="{ visible: shiftHeld }"
+      @click.stop="onRemove"
+    >✕</div>
   </div>
 </template>

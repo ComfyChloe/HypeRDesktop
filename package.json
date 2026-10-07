@@ -15,7 +15,13 @@
     "dev:vite": "vite",
     "build:vite": "vite build",
     "typecheck": "vue-tsc --noEmit",
-    "tauri": "tauri"
+    "typecheck:tests": "vue-tsc --noEmit -p tsconfig.test.json",
+    "tauri": "tauri",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:ui": "vitest --ui",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "test:all": "npm run test:rust && npm run test"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
@@ -24,8 +30,11 @@
   "devDependencies": {
     "@tauri-apps/cli": "^2",
     "@vitejs/plugin-vue": "^5",
+    "@vue/test-utils": "^2.5.1",
+    "happy-dom": "^20.14.5",
     "typescript": "^5",
     "vite": "^6",
+    "vitest": "^5.0.3",
     "vue-tsc": "^2"
   }
 }

@@ -64,28 +64,94 @@ pub fn new_connection_map() -> ConnectionMap {
     Arc::new(std::sync::RwLock::new(HashMap::new()))
 }
 
-/// Send a `phx_join` on the given sink. Shared by `join_channel` and the
-/// per-tracker loop's auto-rejoin path.
-async fn send_phx_join(sink: &mut WsSink, id: &str) -> Result<(), String> {
-    let msg = json!({
-        "topic": format!("hr:{}", id),
+// ==== Phoenix Channels message builders.
+//
+// These are pure functions so the exact wire shape can be unit-tested without
+// a live WebSocket. The sink-sending wrappers below stay thin so the tested
+// payloads and the sent payloads can never drift.
+// ====
+
+/// The topic string for a tracker. All three message kinds and the inbound
+/// `hr_update` topic-strip in the tracker loop share this, so a tracker ID is
+/// namespaced consistently in both directions.
+pub fn hr_topic(id: &str) -> String {
+    format!("hr:{}", id)
+}
+
+/// Body of a `phx_join` for one tracker.
+pub fn phx_join_message(id: &str) -> String {
+    json!({
+        "topic": hr_topic(id),
         "event": "phx_join",
         "payload": {},
         "ref": 0
-    });
-    sink.send(Message::Text(msg.to_string().into()))
+    })
+    .to_string()
+}
+
+/// Body of a `phx_leave` for one tracker.
+pub fn phx_leave_message(id: &str) -> String {
+    json!({
+        "topic": hr_topic(id),
+        "event": "phx_leave",
+        "payload": {},
+        "ref": 0
+    })
+    .to_string()
+}
+
+/// Body of the Phoenix `heartbeat` keepalive, sent on the reserved
+/// `phoenix` topic (not a per-tracker topic).
+pub fn phx_heartbeat_message() -> String {
+    json!({
+        "topic": "phoenix",
+        "event": "heartbeat",
+        "payload": {},
+        "ref": 0
+    })
+    .to_string()
+}
+
+/// Extract the heart rate from an inbound `hr_update` frame.
+///
+/// Returns `None` for anything that is not a well-formed update for `id`:
+/// a non-`hr_update` event, a missing/foreign topic, or a payload without a
+/// numeric `hr`. The tracker loop relies on `None` meaning "ignore this
+/// frame", which is why the topic is checked against the *expected* id
+/// instead of trusting whatever arrived on the socket.
+pub fn parse_hr_update(data: &Value, expected_id: &str) -> Option<u64> {
+    if data["event"].as_str()? != "hr_update" {
+        return None;
+    }
+    let topic = data["topic"].as_str()?;
+    // Defensive: HypeRate shouldn't send hr_update for a different topic on
+    // this socket, but if it ever does we must ignore it.
+    if topic.strip_prefix("hr:")? != expected_id {
+        return None;
+    }
+    data["payload"]["hr"].as_u64()
+}
+
+/// The `phx_reply` status string, or `None` when the frame isn't a reply.
+/// Returns `Some("?")` for a reply with no readable status so callers can log
+/// it without a special case.
+pub fn parse_phx_reply_status(data: &Value) -> Option<&str> {
+    if data["event"].as_str()? != "phx_reply" {
+        return None;
+    }
+    Some(data["payload"]["status"].as_str().unwrap_or("?"))
+}
+
+/// Send a `phx_join` on the given sink. Shared by `join_channel` and the
+/// per-tracker loop's auto-rejoin path.
+async fn send_phx_join(sink: &mut WsSink, id: &str) -> Result<(), String> {
+    sink.send(Message::Text(phx_join_message(id).into()))
         .await
         .map_err(|e| e.to_string())
 }
 
 async fn send_phx_leave(sink: &mut WsSink, id: &str) -> Result<(), String> {
-    let msg = json!({
-        "topic": format!("hr:{}", id),
-        "event": "phx_leave",
-        "payload": {},
-        "ref": 0
-    });
-    sink.send(Message::Text(msg.to_string().into()))
+    sink.send(Message::Text(phx_leave_message(id).into()))
         .await
         .map_err(|e| e.to_string())
 }
@@ -344,57 +410,44 @@ async fn tracker_loop(
                         }
                         Some(Ok(Message::Text(text))) => {
                             if let Ok(data) = serde_json::from_str::<Value>(&text) {
-                                match data["event"].as_str() {
-                                    Some("hr_update") => {
-                                        let topic = data["topic"].as_str().unwrap_or_default();
-                                        if let Some(tid) = topic.strip_prefix("hr:") {
-                                            if tid != id {
-                                                // Defensive: HypeRate shouldn't send hr_update
-                                                // for a different topic on this socket, but if
-                                                // it ever does, ignore it.
-                                                continue;
-                                            }
-                                            if let Some(hr) = data["payload"]["hr"].as_u64() {
-                                                let now_ms = SystemTime::now()
-                                                    .duration_since(UNIX_EPOCH)
-                                                    .unwrap_or_default()
-                                                    .as_millis() as u64;
-                                                let mut updated = false;
-                                                {
-                                                    let mut map = trackers.write().unwrap();
-                                                    if let Some(entry) = map.entries.get_mut(&id) {
-                                                        if hr as u8 != entry.last_heartrate {
-                                                            entry.last_heartrate = hr as u8;
-                                                            entry.last_changed = now_ms;
-                                                            updated = true;
-                                                        }
-                                                        entry.last_update = now_ms;
-                                                    } else {
-                                                        log_warn(&format!(
-                                                            "[hyperate:{id}] hr_update but tracker missing from runtime map"
-                                                        ));
-                                                    }
-                                                }
-                                                if updated {
-                                                    log_info(&format!("[hyperate:{id}] hr_update hr={hr}"));
-                                                }
-                                                last_hr = Some(Instant::now());
-                                                watchdog_count = 0;
-                                                let snapshot = crate::tracker::snapshot_ordered(&trackers.read().unwrap());
-                                                let _ = app.emit("heart-rate-update", &snapshot);
-                                            }
-                                        }
+                                // `parse_phx_reply_status` and `parse_hr_update`
+                                // are the single source of truth for frame
+                                // routing — both are unit-tested directly.
+                                if let Some(status) = parse_phx_reply_status(&data) {
+                                    if status != "ok" {
+                                        log_warn(&format!(
+                                            "[hyperate:{id}] phx_reply status={status} payload={}",
+                                            data["payload"]
+                                        ));
                                     }
-                                    Some("phx_reply") => {
-                                        let status = data["payload"]["status"].as_str().unwrap_or("?");
-                                        if status != "ok" {
+                                } else if let Some(hr) = parse_hr_update(&data, &id) {
+                                    let now_ms = SystemTime::now()
+                                        .duration_since(UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_millis() as u64;
+                                    let mut updated = false;
+                                    {
+                                        let mut map = trackers.write().unwrap();
+                                        if let Some(entry) = map.entries.get_mut(&id) {
+                                            if hr as u8 != entry.last_heartrate {
+                                                entry.last_heartrate = hr as u8;
+                                                entry.last_changed = now_ms;
+                                                updated = true;
+                                            }
+                                            entry.last_update = now_ms;
+                                        } else {
                                             log_warn(&format!(
-                                                "[hyperate:{id}] phx_reply status={status} payload={}",
-                                                data["payload"]
+                                                "[hyperate:{id}] hr_update but tracker missing from runtime map"
                                             ));
                                         }
                                     }
-                                    _ => {}
+                                    if updated {
+                                        log_info(&format!("[hyperate:{id}] hr_update hr={hr}"));
+                                    }
+                                    last_hr = Some(Instant::now());
+                                    watchdog_count = 0;
+                                    let snapshot = crate::tracker::snapshot_ordered(&trackers.read().unwrap());
+                                    let _ = app.emit("heart-rate-update", &snapshot);
                                 }
                             }
                         }
@@ -423,13 +476,8 @@ async fn tracker_loop(
                     if last_heartbeat.elapsed() >= Duration::from_secs(30) {
                         let mut guard = slot.sink.lock().await;
                         if let Some(sink) = guard.as_mut() {
-                            let msg = json!({
-                                "topic": "phoenix",
-                                "event": "heartbeat",
-                                "payload": {},
-                                "ref": 0
-                            });
-                            if sink.send(Message::Text(msg.to_string().into())).await.is_err() {
+                            let msg = phx_heartbeat_message();
+                            if sink.send(Message::Text(msg.into())).await.is_err() {
                                 force_disconnect = true;
                             }
                         }

@@ -3,6 +3,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import HeartWidget from './components/HeartWidget.vue'
+import { shouldResize, stripWidth, STRIP_HEIGHT } from './lib/layout'
 
 // The Rust side emits TrackerSnapshot[] — an ordered array of { id, ...entry }
 // — so config.json order is preserved end-to-end. Iterating a plain array
@@ -29,10 +30,11 @@ let unlisten: UnlistenFn | null = null
 let lastResizedCount = -1
 
 async function resizeTo(count: number) {
-  if (count === lastResizedCount) return
+  // Heart-rate snapshots arrive several times a second, so resize only when
+  // the tracker count actually changes. Sizing rules live in `lib/layout.ts`.
+  if (!shouldResize(lastResizedCount, count)) return
   lastResizedCount = count
-  const width = Math.max(count * 100, 100)
-  await invoke('resize_window', { width, height: 100 })
+  await invoke('resize_window', { width: stripWidth(count), height: STRIP_HEIGHT })
 }
 
 async function updateTrackers(data: TrackerSnapshot[]) {

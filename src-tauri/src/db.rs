@@ -27,8 +27,24 @@ pub async fn create_pool(config: &Config) -> Option<MySqlPool> {
     }
 }
 
+/// Sanitise a tracker ID into a MySQL-safe identifier fragment.
+///
+/// Tracker IDs come from user input and are interpolated into a
+/// backtick-quoted table name, so everything outside `[A-Za-z0-9_]` is
+/// stripped. This is the *only* thing standing between a hostile ID and the
+/// table name, so it is unit-tested directly rather than trusted.
+pub fn safe_table_id(id: &str) -> String {
+    id.chars().filter(|c| c.is_alphanumeric() || *c == '_').collect()
+}
+
+/// Fully-qualified table name for a tracker. Backticked so the name can't be
+/// reinterpreted as a keyword even after sanitising.
+pub fn table_name(id: &str) -> String {
+    format!("CODE_{}", safe_table_id(id))
+}
+
 async fn create_table(pool: &MySqlPool, id: &str) -> bool {
-    let safe_id: String = id.chars().filter(|c| c.is_alphanumeric() || *c == '_').collect();
+    let safe_id = safe_table_id(id);
     let sql = format!(
         "CREATE TABLE IF NOT EXISTS `CODE_{safe_id}` (\
             id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,\
@@ -84,7 +100,7 @@ pub fn start_db_timer(pool: Option<MySqlPool>, trackers: TrackerMap, config: Con
             };
 
             for (id, hr) in snapshot {
-                let safe_id: String = id.chars().filter(|c| c.is_alphanumeric() || *c == '_').collect();
+                let safe_id = safe_table_id(&id);
                 if !ready_tables.contains(&safe_id) {
                     if create_table(&pool, &id).await {
                         ready_tables.insert(safe_id.clone());

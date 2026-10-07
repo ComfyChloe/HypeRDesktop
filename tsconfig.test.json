@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // Vitest globals (describe/it/expect) come from the runtime types rather
+    // than a global declaration, so the test files import them explicitly.
+    "types": ["vitest/globals", "node"]
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "src/**/*.vue",
+    "tests/**/*.ts",
+    "vitest.config.ts"
+  ]
+}

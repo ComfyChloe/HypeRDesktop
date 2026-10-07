@@ -5,11 +5,23 @@ mod hyperate;
 mod log;
 mod tracker;
 
+// Re-exported so the integration tests in `src-tauri/tests/` can reach the
+// pure logic without a Tauri app instance or a live WebSocket. Everything
+// here is side-effect free; the `run()` entry point below is unchanged.
+pub use config::{Config, TrackerConfig};
+pub use db::{safe_table_id, table_name};
+pub use hyperate::{
+    hr_topic, parse_hr_update, parse_phx_reply_status, phx_heartbeat_message, phx_join_message,
+    phx_leave_message,
+};
+pub use tracker::{
+    new_tracker_map, ordered_ids, snapshot_ordered, TrackerEntry, TrackerMapInner, TrackerSnapshot,
+};
+
 use commands::app::{close_window, resize_window};
 use commands::tracker::{add_tracker, get_trackers, remove_tracker};
 use hyperate::new_connection_map;
 use tauri::{Emitter, Manager};
-use tracker::new_tracker_map;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
